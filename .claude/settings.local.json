@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(sw_vers)",
+      "Bash(system_profiler SPDisplaysDataType)",
+      "Bash(git init *)",
+      "Bash(npm view *)",
+      "Bash(npm install *)",
+      "Bash(npx playwright *)",
+      "Bash(node -e \"const p=require\\('three/package.json'\\); console.log\\('version:', p.version\\); console.log\\('exports keys:', Object.keys\\(p.exports\\).join\\(', '\\)\\); console.log\\('types?:', p.types || p.typings || 'none-top'\\)\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import json,sys; v=json.load\\(sys.stdin\\); print\\([x for x in v if '184' in x or '183' in x or '182' in x]\\)\")",
+      "Bash(npm i *)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5173/)",
+      "Bash(npx tsx *)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'Phase 0: scaffold, WebGPU engine, Playwright harness, compare tool *)"
+    ]
+  }
+}
