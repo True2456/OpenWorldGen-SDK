@@ -44,6 +44,9 @@ import { SUN_E } from './Atmosphere';
 const BASE_RES = 96;
 const DETAIL_RES = 32;
 const SHADOW_RES = 768;
+const WEATHER_RES = 512;
+/** weather field world span (m) — tiles beyond this, far past the playable area */
+const WEATHER_WORLD = 26000;
 /** cloud layer altitudes (m) — below the ~2000 m summits */
 export const CLOUD_BOTTOM = 1250;
 export const CLOUD_TOP = 1900;
@@ -52,6 +55,8 @@ const SHADOW_WORLD = WORLD_SIZE * 1.6;
 export class Clouds {
   readonly baseNoise: Storage3DTexture;
   readonly detailNoise: Storage3DTexture;
+  /** r: weather/coverage field (baked 3-oct fbm — hot path in the march) */
+  readonly weatherMap: StorageTexture;
   /** r: transmittance toward the sun through the layer, top-down */
   readonly shadowMap: StorageTexture;
   readonly coverage = uniform(0.46);
@@ -79,6 +84,9 @@ export class Clouds {
     this.shadowMap = new StorageTexture(SHADOW_RES, SHADOW_RES);
     this.shadowMap.type = HalfFloatType;
     this.shadowMap.generateMipmaps = false;
+    this.weatherMap = new StorageTexture(WEATHER_RES, WEATHER_RES);
+    this.weatherMap.type = HalfFloatType;
+    this.weatherMap.generateMipmaps = false;
   }
 
   async init(renderer: Renderer): Promise<void> {
@@ -123,6 +131,25 @@ export class Clouds {
     })().compute(M * M * M);
     detailK.setName('cloudDetailNoise');
     await renderer.computeAsync(detailK);
+
+    // --- weather field bake (wraps at WEATHER_WORLD) ---------------------------
+    const W = WEATHER_RES;
+    const weatherK = Fn(() => {
+      const i = instanceIndex;
+      If(i.greaterThanEqual(W * W), () => {
+        Return();
+      });
+      const x = i.mod(W);
+      const y = i.div(W);
+      const uv01 = vec2(float(x).add(0.5), float(y).add(0.5)).div(W);
+      // periodic domain via worley/fractal over a wrapped circle would cost
+      // more than it buys at this span; sample fbm directly (seam is 26 km out)
+      const wUv = uv01.sub(0.5).mul(WEATHER_WORLD / 5200);
+      const v = mx_fractal_noise_float(wUv, 3, 2.2, 0.5, 1).mul(0.5).add(0.5);
+      textureStore(this.weatherMap, uvec2(x.toUint(), y.toUint()), vec4(v, 0, 0, 1)).toWriteOnly();
+    })().compute(W * W);
+    weatherK.setName('cloudWeather');
+    await renderer.computeAsync(weatherK);
 
     // --- cloud shadow map kernel (re-run on sun/ToD change) -------------------
     const S = SHADOW_RES;
@@ -169,9 +196,10 @@ export class Clouds {
     const inLayer = smoothstep(0, 0.12, hNorm).mul(smoothstep(1, 0.55, hNorm));
     if (this.flatDebug) return inLayer.mul(0.3).mul(float(this.density));
     // weather/coverage field: large-scale variation breaks the layer into
-    // cumulus masses with clear lanes
-    const wUv = wp.xz.div(5200);
-    const weather = mx_fractal_noise_float(wUv, 3, 2.2, 0.5, 1).mul(0.5).add(0.5);
+    // cumulus masses with clear lanes (baked texture — fbm here was the
+    // hottest math in the march: 40 steps × 4 sun taps × 3 octaves)
+    const wUv = wp.xz.div(WEATHER_WORLD).add(0.5).fract();
+    const weather = texture(this.weatherMap, wUv, 0).x;
     const cov = clamp(weather.sub(float(1).sub(float(this.coverage))), 0, 1).mul(2.2);
     const base = texture3D(this.baseNoise, wp.div(3600).fract(), 0).x;
     let dens = clamp(base.mul(cov).sub(float(0.32).mul(hNorm.add(0.45))), 0, 1).mul(inLayer);
@@ -211,7 +239,7 @@ export class Clouds {
 
     const valid = tExit.greaterThan(tEnter).and(dir.y.abs().greaterThan(1e-4));
 
-    const STEPS = 40;
+    const STEPS = 32;
     const seg = tExit.sub(tEnter).div(STEPS);
     const trans = float(1).toVar();
     const light = vec3(0).toVar();
@@ -238,11 +266,11 @@ export class Clouds {
         const sp = camPos.add(dir.mul(t));
         const dens = this.sampleDensity(sp, true);
         If(dens.greaterThan(0.002), () => {
-          // cheap sun occlusion: 4 coarse steps toward the sun
+          // cheap sun occlusion: 3 coarse steps toward the sun
           const lTau = float(0).toVar();
-          for (let ls = 1; ls <= 4; ls++) {
-            const lp = sp.add(sunDir.mul(ls * 130));
-            lTau.addAssign(this.sampleDensity(lp, false).mul(130));
+          for (let ls = 1; ls <= 3; ls++) {
+            const lp = sp.add(sunDir.mul(ls * 165));
+            lTau.addAssign(this.sampleDensity(lp, false).mul(165));
           }
           const sunVis = exp(lTau.mul(-0.04));
           const powder = float(1).sub(exp(dens.mul(-22)));

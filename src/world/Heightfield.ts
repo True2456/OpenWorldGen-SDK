@@ -31,6 +31,7 @@ import {
 import type { LaasParams } from '../core/Params';
 import type { WorldSeed } from '../core/Seed';
 import { bilerpFloatBuffer, uvToGrid } from '../gpu/BufferSample';
+import { bakeNoiseTextures } from '../gpu/passes/NoiseBake';
 import type { NF, NV2, NV3 } from '../gpu/TSLTypes';
 import { runBiomeSnow } from '../gpu/passes/BiomeSnow';
 import { runErosion } from '../gpu/passes/Erosion';
@@ -72,6 +73,9 @@ export class Heightfield {
   readonly heightTex: StorageTexture;
   /** rgba16f: xyz = world-space normal, w = slope (rise/run) */
   readonly normalTex: StorageTexture;
+  /** baked tileable noise (see NoiseBake channel map) — materials sample these */
+  noiseA: StorageTexture | null = null;
+  noiseB: StorageTexture | null = null;
 
   private constructor(
     cfg: QualityConfig,
@@ -113,6 +117,10 @@ export class Heightfield {
     normalTex.generateMipmaps = false;
 
     const hf = new Heightfield(cfg, mp, synth, heightTex, normalTex);
+
+    const noise = await bakeNoiseTextures(renderer);
+    hf.noiseA = noise.texA;
+    hf.noiseB = noise.texB;
 
     // --- erosion at sim res, then detail-preserving compose back to full res --
     progress(0.08, `terrain: synthesizing ${cfg.simRes}² erosion grid`);
@@ -286,6 +294,16 @@ export class Heightfield {
    */
   sampleHeight(p: NV2): NF {
     return this.sampleHeightFrom(this.height, p);
+  }
+
+  /** nearest-cell height read — for cost-insensitive paths (shadow casting) */
+  sampleHeightNearest(p: NV2): NF {
+    const res = this.res;
+    const uv = this.uvFromWorld(p);
+    const g = clamp(uv, 0, 1).mul(res);
+    const x = clamp(floor(g.x), 0, res - 1).toInt();
+    const y = clamp(floor(g.y), 0, res - 1).toInt();
+    return this.height.element(y.mul(res).add(x));
   }
 
   /** same, from an arbitrary res×res float buffer (e.g. preErosion) */

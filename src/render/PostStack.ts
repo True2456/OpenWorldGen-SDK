@@ -33,6 +33,7 @@ import {
   mrt,
   output,
   pass,
+  rtt,
   screenUV,
   smoothstep,
   texture,
@@ -63,7 +64,10 @@ export class PostStack {
     clouds: Clouds | null = null,
   ) {
     const { renderer, scene, camera } = engine;
-    const cloudview = new URLSearchParams(window.location.search).get('cloudview');
+    const q = new URLSearchParams(window.location.search);
+    const cloudview = q.get('cloudview');
+    // perf attribution: ?ablate=clouds,ao,taa,bloom disables stages
+    const ablate = new Set((q.get('ablate') ?? '').split(','));
     // debug probes need raw values — tone mapping would garble them
     renderer.toneMapping = cloudview ? NoToneMapping : AgXToneMapping;
     renderer.toneMappingExposure = 1.0;
@@ -97,6 +101,37 @@ export class PostStack {
     const normalTex = scenePass.getTextureNode('normal');
     const velocityTex = scenePass.getTextureNode('velocity');
 
+    // --- half-res volumetric cloud layer (own quad pass) -----------------------
+    // The march is by far the most expensive screen-space work; running it at
+    // half res quarters the ray count. Jitter + TRAA absorb the upsample.
+    let cloudTex: NV4 | null = null;
+    if (clouds && !ablate.has('clouds')) {
+      const cloudLayer = Fn((): NV4 => {
+        const d = depthTex.x;
+        const viewDirV = getViewPosition(screenUV, float(0.5), uProjInv).normalize();
+        const dirW = uCamWorld.mul(vec4(viewDirV, 0)).xyz.normalize().toVar();
+        const dist = getViewPosition(screenUV, d, uProjInv).length();
+        const isSky = d.lessThanEqual(1e-7).or(d.greaterThanEqual(0.9999999));
+        const maxD = isSky.select(float(1e9), dist);
+        const jitter = hash12(
+          screenUV.mul(vec2(911.3, 423.7)).add(float(frameU).mul(0.61803)),
+        );
+        const cl = clouds.march(camPosW, dirW, maxD, jitter);
+        return vec4(cl.color, cl.alpha);
+      })();
+      const cloudRtt = rtt(cloudLayer);
+      const sizeClouds = (): void => {
+        const dpr = renderer.getPixelRatio();
+        cloudRtt.setSize(
+          Math.max(2, Math.floor(window.innerWidth * dpr * 0.5)),
+          Math.max(2, Math.floor(window.innerHeight * dpr * 0.5)),
+        );
+      };
+      sizeClouds();
+      window.addEventListener('resize', sizeClouds);
+      cloudTex = cloudRtt as unknown as NV4;
+    }
+
     // --- aerial perspective from depth -----------------------------------------
     const aerialNode = Fn((): NV3 => {
       const d = depthTex.x.toVar();
@@ -115,11 +150,8 @@ export class PostStack {
       // reversed-z: far plane clears to 0 → sky already carries the atmosphere
       const scenePart = isSky.select(col, hazed).toVar();
 
-      if (clouds) {
+      if (clouds && !ablate.has('clouds')) {
         const maxD = isSky.select(float(1e9), dist);
-        const jitter = hash12(
-          screenUV.mul(vec2(911.3, 423.7)).add(float(frameU).mul(0.61803)),
-        );
         if (cloudview === '2') {
           // constant output; march not built at all (graph-pollution bisect)
           scenePart.assign(vec3(1, 0, 0));
@@ -157,13 +189,13 @@ export class PostStack {
         } else if (cloudview === '3') {
           // isSky probe: white = far-plane depth
           scenePart.assign(isSky.select(vec3(1), vec3(0)));
-        } else {
-          const cl = clouds.march(camPosW, dirW, maxD, jitter);
+        } else if (cloudTex) {
+          const cl4 = cloudTex;
           if (cloudview === '1') {
             // march alpha as magenta overlay
-            scenePart.assign(mix(scenePart, vec3(1, 0, 1), clamp(cl.alpha, 0, 1)));
+            scenePart.assign(mix(scenePart, vec3(1, 0, 1), clamp(cl4.a, 0, 1)));
           } else {
-            scenePart.assign(scenePart.mul(float(1).sub(cl.alpha)).add(cl.color));
+            scenePart.assign(scenePart.mul(float(1).sub(cl4.a)).add(cl4.rgb));
           }
         }
       }
@@ -174,17 +206,31 @@ export class PostStack {
       return scenePart;
     })();
 
-    // --- GTAO --------------------------------------------------------------------
+    // --- GTAO (full res: resolutionScale 0.5 produced row-streak artifacts) ------
+    // defaults are mesh-viewer scale: 16 samples cost ~50 ms on terrain vistas
     const aoPass = ao(depthTex, normalTex, camera);
-    const withAO = aerialNode.mul(aoPass.getTextureNode().x);
+    const aoCfg = aoPass as unknown as {
+      samples: { value: number };
+      radius: { value: number };
+      distanceFallOff: { value: number };
+    };
+    aoCfg.samples.value = 8;
+    aoCfg.radius.value = 1.6;
+    aoCfg.distanceFallOff.value = 0.6;
+    const withAO = ablate.has('ao')
+      ? aerialNode
+      : aerialNode.mul(aoPass.getTextureNode().x);
 
     // --- TRAA ----------------------------------------------------------------------
-    const taaed = traa(withAO, depthTex, velocityTex, camera);
+    const taaed = ablate.has('taa')
+      ? (withAO as unknown as ReturnType<typeof traa>)
+      : traa(withAO, depthTex, velocityTex, camera);
 
     // --- bloom -----------------------------------------------------------------------
-    const bloomNode = bloom(taaed, 0.28, 0.45, 1.5);
     const taaedRgb = (taaed as unknown as NV4).rgb;
-    const withBloom = taaedRgb.add((bloomNode as unknown as NV4).rgb);
+    const withBloom = ablate.has('bloom')
+      ? taaedRgb
+      : taaedRgb.add((bloom(taaed, 0.28, 0.45, 1.5) as unknown as NV4).rgb);
 
     // --- auto exposure (GPU-only feedback) ----------------------------------------------
     this.exposureBuf = instancedArray(2, 'float');

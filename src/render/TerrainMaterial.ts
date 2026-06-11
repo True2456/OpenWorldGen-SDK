@@ -10,6 +10,11 @@
  * Snow edges are hash-dithered. Wet margins darken. Far mode swaps the micro
  * bands for far-detail synthesis: ridged noise re-amplified in the normal
  * domain so distant mountains stay serrated (Pillar D).
+ *
+ * PERF: all repeated noise comes from the baked NoiseBake textures (was ~35
+ * live noise evaluations per pixel ≈ 52 ms/frame; now ~14 filtered fetches).
+ * Gradient channels are pre-derived, so bump/ridge detail is one fetch
+ * instead of four finite-difference evaluations.
  */
 
 import type { StorageTexture } from 'three/webgpu';
@@ -18,8 +23,6 @@ import {
   clamp,
   float,
   mix,
-  mx_fractal_noise_float,
-  mx_noise_float,
   positionWorld,
   smoothstep,
   texture,
@@ -29,6 +32,11 @@ import {
 } from 'three/tsl';
 import type { NF, NV2, NV3, NV4 } from '../gpu/TSLTypes';
 import { hash12 } from '../gpu/noise/NoiseTSL';
+import {
+  PERIOD_FBM,
+  PERIOD_RID,
+  PERIOD_VAL,
+} from '../gpu/passes/NoiseBake';
 import { zoneMasks, type MacroParams } from '../world/MacroMap';
 import { LAKE_LEVEL, WORLD_SIZE } from '../world/WorldConst';
 
@@ -39,6 +47,9 @@ export interface TerrainShadingInputs {
   biomeTex: StorageTexture;
   /** rgba16f at sim res: moisture, flowStrength, riverDepth, W */
   fieldsTex: StorageTexture;
+  /** baked tileable noise (NoiseBake channel map) */
+  noiseA: StorageTexture;
+  noiseB: StorageTexture;
   mp: MacroParams;
   /** far shell: cheaper bands + far-detail synthesis */
   far: boolean;
@@ -64,6 +75,25 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   const uv = uvFromWorld(wxz);
   const h = wp.y;
 
+  // --- baked-noise helpers (uv = world / (scale · channel period)) -----------
+  /** value noise [0,1] at world feature scale `s` m */
+  const val = (s: number, ox = 0, oz = 0): NF =>
+    texture(inp.noiseA, wxz.div(s * PERIOD_VAL).add(vec2(ox, oz))).x;
+  /** signed value noise [-1,1] */
+  const valS = (s: number, ox = 0, oz = 0): NF => val(s, ox, oz).mul(2).sub(1);
+  /** fbm-3 [0,1] */
+  const fbmV = (s: number, ox = 0, oz = 0): NF =>
+    texture(inp.noiseA, wxz.div(s * PERIOD_FBM).add(vec2(ox, oz))).y;
+  /** fbm-3 gradient (d/dx, d/dz in world units at feature scale s) */
+  const fbmG = (s: number, ox = 0, oz = 0): NV2 =>
+    texture(inp.noiseA, wxz.div(s * PERIOD_FBM).add(vec2(ox, oz))).zw.div(s);
+  /** ridged-3 gradient (world units at feature scale s) */
+  const ridG = (s: number): NV2 =>
+    texture(inp.noiseB, wxz.div(s * PERIOD_RID)).xy.div(s);
+  /** 1D band noise [0,1] along an arbitrary phase axis */
+  const band = (phase: NF, lane: NF): NF =>
+    texture(inp.noiseA, vec2(phase, lane).div(PERIOD_VAL)).x;
+
   const ns = inp.baseNormalSlope ?? texture(inp.normalTex, uv);
   const baseNormal = ns.xyz.normalize().toVar();
   const slope = ns.w.toVar();
@@ -78,27 +108,23 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   const zm = zoneMasks(wxz, inp.mp);
 
   // ---------- macro variation (2–50 m breakup — tiling killer) ----------------
-  const macroA = mx_noise_float(wxz.div(43.7)).mul(0.5).add(0.5);
-  const macroB = mx_noise_float(wxz.div(11.3).add(57.1)).mul(0.5).add(0.5);
+  const macroA = val(43.7);
+  const macroB = val(11.3, 0.37, 0.61);
   const macroMix = macroA.mul(0.65).add(macroB.mul(0.35));
   const macroTint = macroMix.sub(0.5).mul(0.16); // ±8% value shift
 
   // ---------- meso/micro detail noise ------------------------------------------
-  const meso = inp.far
-    ? float(0.5)
-    : mx_fractal_noise_float(wxz.div(1.45), 3, 2.1, 0.55, 1).mul(0.5).add(0.5);
-  const micro = inp.far ? float(0.5) : mx_noise_float(wxz.div(0.19)).mul(0.5).add(0.5);
+  const meso = inp.far ? float(0.5) : fbmV(1.45);
+  const micro = inp.far ? float(0.5) : val(0.19, 0.71, 0.13);
 
   // ---------- class palettes ----------------------------------------------------
   // rock: subtle strata banding; warm rust in the alpine zone, pale gray in
   // karst. Low contrast + heavy phase warp so it reads as geology, not zebra.
   const strataPhase = h
     .mul(0.028)
-    .add(mx_noise_float(wxz.div(74)).mul(3.6))
-    .add(mx_noise_float(wxz.div(540)).mul(2.4));
-  const strata = mx_noise_float(vec2(strataPhase, mx_noise_float(wxz.div(610)).mul(1.7)))
-    .mul(0.5)
-    .add(0.5)
+    .add(valS(74, 0.11, 0.83).mul(3.6))
+    .add(valS(540, 0.43, 0.29).mul(2.4));
+  const strata = band(strataPhase, valS(610, 0.67, 0.41).mul(1.7).add(31.7))
     .mul(0.55)
     .add(0.22); // compress contrast
   const alpRock = mix(vec3(0.35, 0.26, 0.2), vec3(0.5, 0.41, 0.34), strata);
@@ -108,11 +134,11 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   rockCol = mix(rockCol, alpRock, zm.tAlp.mul(0.85));
   // iron-oxide bands: dark rust layers at noise-chosen elevations (refs show
   // strong hue layering on alpine faces)
-  const ironPhase = mx_noise_float(vec2(h.mul(0.011), mx_noise_float(wxz.div(800)).mul(1.3)));
-  const ironBand = smoothstep(0.32, 0.58, ironPhase).mul(smoothstep(0.85, 0.55, ironPhase));
+  const ironPhase = band(h.mul(0.011), valS(800, 0.07, 0.93).mul(1.3).add(57.3));
+  const ironBand = smoothstep(0.45, 0.62, ironPhase).mul(smoothstep(0.85, 0.62, ironPhase));
   rockCol = mix(rockCol, vec3(0.3, 0.18, 0.12), ironBand.mul(zm.tAlp.mul(0.6).add(0.12)));
   // lichen/weathering: dark macro splotches on long-exposed faces
-  const lichen = smoothstep(0.6, 0.85, mx_noise_float(wxz.div(23.7)).mul(0.5).add(0.5));
+  const lichen = smoothstep(0.6, 0.85, val(23.7, 0.53, 0.27));
   rockCol = mix(rockCol, rockCol.mul(0.62), lichen.mul(0.5));
   // cavity dirt: concave-ish micro band darkening
   rockCol = rockCol.mul(meso.mul(0.22).add(0.89)).mul(micro.mul(0.1).add(0.95));
@@ -182,37 +208,30 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   // DISTANCE on both near tiles and the far shell.
   const camDist = wp.sub(cameraPosition).length();
   const farK = inp.far ? float(1) : smoothstep(900, 2600, camDist);
-  const e = 22;
-  const ridgeAt = (q: NV2): NF =>
-    mx_fractal_noise_float(q.div(310), 3, 2.2, 0.55, 1).abs().oneMinus();
-  const rdx = ridgeAt(wxz.add(vec2(e, 0))).sub(ridgeAt(wxz.sub(vec2(e, 0))));
-  const rdz = ridgeAt(wxz.add(vec2(0, e))).sub(ridgeAt(wxz.sub(vec2(0, e))));
+  // pre-baked ridged gradient at 310 m features; ×44 ≈ the old ±22 m
+  // finite-difference amplitude (×2: baked noise is [0,1], mx was [-1,1])
+  const rg = ridG(310).mul(44 * 2);
   const farAmp = smoothstep(0.5, 1.1, slope).mul(0.4).add(0.08).mul(farK);
   // never let detail flip the surface away from the sky
-  const perturbed = baseNormal.add(vec3(rdx, 0, rdz).mul(farAmp));
+  const perturbed = baseNormal.add(vec3(rg.x, 0, rg.y).mul(farAmp));
   let nrm: NV3 = vec3(perturbed.x, perturbed.y.max(0.1), perturbed.z).normalize();
 
   if (!inp.far) {
-    // meso + micro analytic bumps near camera, stronger on rock
-    const e1 = 0.9;
-    const b1x = mx_noise_float(wxz.add(vec2(e1, 0)).div(1.45)).sub(
-      mx_noise_float(wxz.sub(vec2(e1, 0)).div(1.45)),
-    );
-    const b1z = mx_noise_float(wxz.add(vec2(0, e1)).div(1.45)).sub(
-      mx_noise_float(wxz.sub(vec2(0, e1)).div(1.45)),
-    );
-    const e2 = 0.12;
-    const b2x = mx_noise_float(wxz.add(vec2(e2, 0)).div(0.19)).sub(
-      mx_noise_float(wxz.sub(vec2(e2, 0)).div(0.19)),
-    );
-    const b2z = mx_noise_float(wxz.add(vec2(0, e2)).div(0.19)).sub(
-      mx_noise_float(wxz.sub(vec2(0, e2)).div(0.19)),
-    );
+    // meso + micro analytic bumps near camera, stronger on rock — baked fbm
+    // gradients at two scales (×2e ≈ old FD amplitudes, ×2 range factor)
+    const b1 = fbmG(1.45).mul(1.8 * 2);
+    const b2 = fbmG(0.19, 0.31, 0.77).mul(0.24 * 2);
     const bumpAmp = mix(float(0.25), float(0.85), rockW)
       .mul(snowW.mul(0.7).oneMinus())
       .mul(farK.oneMinus());
     nrm = nrm
-      .add(vec3(b1x.mul(0.7).add(b2x.mul(0.45)), 0, b1z.mul(0.7).add(b2z.mul(0.45))).mul(bumpAmp))
+      .add(
+        vec3(
+          b1.x.mul(0.7).add(b2.x.mul(0.45)),
+          0,
+          b1.y.mul(0.7).add(b2.y.mul(0.45)),
+        ).mul(bumpAmp),
+      )
       .normalize();
   }
 

@@ -46,6 +46,7 @@ export class TerrainTiles {
   readonly farShell: Mesh;
   private tileData: Float32Array;
   private tileBuf: StorageBufferNode<'vec4'>;
+  private hf: Heightfield;
   private lastCamX = Infinity;
   private lastCamZ = Infinity;
   activeTiles = 0;
@@ -55,6 +56,12 @@ export class TerrainTiles {
     debugView: string | null = null,
     opts: { heightBuf?: typeof hf.height; neutral?: boolean; screenHalf?: 'left' | 'right' } = {},
   ) {
+    this.hf = hf;
+    // ?ablate=mat → neutral clay (perf attribution for the splat material)
+    const ablate = new Set(
+      (new URLSearchParams(window.location.search).get('ablate') ?? '').split(','),
+    );
+    if (ablate.has('mat')) opts = { ...opts, neutral: true };
     // --- per-tile buffer -------------------------------------------------------
     this.tileData = new Float32Array(MAX_TILES * 4);
     this.tileBuf = instancedArray(this.tileData, 'vec4');
@@ -86,11 +93,20 @@ export class TerrainTiles {
     // instance + object matrices are identity → positionNode is world space
     const hSample = hf.sampleHeightFrom(heightBuf, wpos);
     mat.positionNode = vec3(wpos.x, hSample, wpos.y);
+    // shadow casting: skip the morph + bilinear (4 reads → 1); cascade texels
+    // are meters wide, normalBias absorbs the nearest-fetch steps
+    mat.castShadowPositionNode = vec3(
+      wpos0.x,
+      hf.sampleHeightNearest(wpos0),
+      wpos0.y,
+    );
 
     const shading = buildTerrainShading({
       normalTex: hf.normalTex,
       biomeTex: hf.biomeTex as NonNullable<typeof hf.biomeTex>,
       fieldsTex: hf.fieldsTex as NonNullable<typeof hf.fieldsTex>,
+      noiseA: hf.noiseA as NonNullable<typeof hf.noiseA>,
+      noiseB: hf.noiseB as NonNullable<typeof hf.noiseB>,
       mp: hf.mp,
       far: false,
     });
@@ -98,6 +114,18 @@ export class TerrainTiles {
     mat.normalNode = shading.normalNode;
     mat.roughnessNode = shading.roughnessNode;
     mat.metalnessNode = float(0);
+    if (debugView === 'lod') {
+      // distinct color per LOD level + faint grid along tile edges
+      const lod = tile.w;
+      const edge = positionLocal.xz.abs().x.max(positionLocal.xz.abs().y);
+      const grid = edge.greaterThan(0.492).select(float(0.25), float(1));
+      mat.colorNode = vec3(0.02);
+      mat.emissiveNode = vec3(
+        lod.mul(0.9173).add(0.13).fract(),
+        lod.mul(0.3719).add(0.41).fract(),
+        lod.mul(0.7177).add(0.79).fract(),
+      ).mul(grid);
+    }
     if ((debugView === 'snow' || debugView === 'bioR' || debugView === 'bioB') && hf.biomeTex) {
       // single-channel classification view: white = channel value
       const b = texture(hf.biomeTex, positionWorld.xz.div(WORLD_SIZE).add(0.5));
@@ -162,6 +190,8 @@ export class TerrainTiles {
       normalTex: hf.normalTex,
       biomeTex: hf.biomeTex as NonNullable<typeof hf.biomeTex>,
       fieldsTex: hf.fieldsTex as NonNullable<typeof hf.fieldsTex>,
+      noiseA: hf.noiseA as NonNullable<typeof hf.noiseA>,
+      noiseB: hf.noiseB as NonNullable<typeof hf.noiseB>,
       mp: hf.mp,
       far: true,
       baseNormalSlope: farNS,
@@ -193,10 +223,15 @@ export class TerrainTiles {
       data[n * 4 + 3] = lod;
       n++;
     };
+    const cy = camera.position.y;
     const recurse = (ox: number, oz: number, size: number, lod: number): void => {
       const dx = Math.max(Math.abs(cx - ox) - size / 2, 0);
       const dz = Math.max(Math.abs(cz - oz) - size / 2, 0);
-      const dist = Math.hypot(dx, dz);
+      // 3D distance: from high altitude the ground straight below does not
+      // need MIN_TILE resolution (slack absorbs in-tile height spread)
+      const groundY = this.hf.heightAtCpu(ox, oz);
+      const dy = Math.max(Math.abs(cy - groundY) - 250, 0) * 0.8;
+      const dist = Math.hypot(dx, dz, dy);
       if (size > MIN_TILE && dist < size * SPLIT_K) {
         const q = size / 4;
         const h = size / 2;

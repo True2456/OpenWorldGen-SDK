@@ -109,6 +109,23 @@ async function main(): Promise<void> {
     settleFrames,
   );
 
+  // --gpusample N: poll GPU pass timings N times → median (timestamps are noisy)
+  const gpuN = Number(str(args['gpusample']) ?? 0);
+  if (gpuN > 0) {
+    const samples: number[] = [];
+    for (let i = 0; i < gpuN; i++) {
+      await page.evaluate(async () => window.__laas.settle && (await window.__laas.settle(12)));
+      const v = await page.evaluate(() => {
+        const g = window.__laas.stats?.gpuPasses ?? {};
+        return (g['render'] ?? 0) + (g['compute'] ?? 0);
+      });
+      if (v > 0) samples.push(v);
+    }
+    samples.sort((a, b) => a - b);
+    const med = samples[Math.floor(samples.length / 2)] ?? 0;
+    console.log(`[gpu] median=${med.toFixed(1)}ms over ${samples.length} samples`);
+  }
+
   mkdirSync(dirname(out), { recursive: true });
   await page.screenshot({ path: out });
 

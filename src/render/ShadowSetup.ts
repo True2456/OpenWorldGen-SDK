@@ -93,25 +93,35 @@ export function setupSunShadows(
   camera: PerspectiveCamera,
   cloudShadow?: (wxz: NV2) => NF,
 ): ShadowRig {
+  // perf attribution: ?ablate=shadows (no casting) | pcss (default filter)
+  const ablate = new Set(
+    (new URLSearchParams(window.location.search).get('ablate') ?? '').split(','),
+  );
+  if (ablate.has('shadows')) {
+    sun.castShadow = false;
+    return { csm: null as unknown as CSMShadowNode };
+  }
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   sun.shadow.bias = -0.00012;
   sun.shadow.normalBias = 2.2;
   sun.shadow.radius = 1.15;
 
-  const filter = cloudShadow
-    ? Fn((inputs: unknown) => {
-        const base = (pcssFilter as unknown as (i: unknown) => NF)(inputs);
-        return base.mul(cloudShadow(positionWorld.xz));
-      })
-    : pcssFilter;
-  (sun.shadow as unknown as { filterNode: unknown }).filterNode = filter;
+  if (!ablate.has('pcss')) {
+    const filter = cloudShadow
+      ? Fn((inputs: unknown) => {
+          const base = (pcssFilter as unknown as (i: unknown) => NF)(inputs);
+          return base.mul(cloudShadow(positionWorld.xz));
+        })
+      : pcssFilter;
+    (sun.shadow as unknown as { filterNode: unknown }).filterNode = filter;
+  }
 
   const csm = new CSMShadowNode(sun, {
     cascades: 4,
-    maxFar: 4200,
+    maxFar: 3200,
     mode: 'practical',
-    lightMargin: 900,
+    lightMargin: 700,
   });
   csm.fade = true;
   (sun.shadow as unknown as { shadowNode: unknown }).shadowNode = csm;
