@@ -13,6 +13,7 @@ import { initHooks } from './core/Hooks';
 import { parseCamString, parseParams } from './core/Params';
 import { WorldSeed } from './core/Seed';
 import { Hud } from './debug/HUD';
+import { buildGalleryScene } from './debug/GalleryScene';
 import { buildSanityScene } from './debug/SanityScene';
 import { buildTerrainScene } from './debug/TerrainScene';
 import { buildScene, registerScene, type WorldContext } from './debug/Scenes';
@@ -43,6 +44,7 @@ async function boot(): Promise<void> {
   const seed = new WorldSeed(params.seed);
   registerScene('sanity', buildSanityScene);
   registerScene('terrain', buildTerrainScene);
+  registerScene('gallery', buildGalleryScene);
   // 'world' becomes the streamed open world once terrain tiles land.
   registerScene('world', buildTerrainScene);
 

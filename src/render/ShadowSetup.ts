@@ -92,6 +92,7 @@ export function setupSunShadows(
   sun: DirectionalLight,
   camera: PerspectiveCamera,
   cloudShadow?: (wxz: NV2) => NF,
+  opts?: { maxFar?: number; lightMargin?: number },
 ): ShadowRig {
   // perf attribution: ?ablate=shadows (no casting) | pcss (default filter)
   const ablate = new Set(
@@ -119,9 +120,9 @@ export function setupSunShadows(
 
   const csm = new CSMShadowNode(sun, {
     cascades: 4,
-    maxFar: 3200,
+    maxFar: opts?.maxFar ?? 3200,
     mode: 'practical',
-    lightMargin: 700,
+    lightMargin: opts?.lightMargin ?? 700,
   });
   csm.fade = true;
   (sun.shadow as unknown as { shadowNode: unknown }).shadowNode = csm;
