@@ -181,15 +181,51 @@ cov 0.62), contact shadows (?ablate=contact to A/B), black facets root-caused to
 
 ## Next actions (always keep current)
 
+- SHADOW SYSTEM v2 LANDED (commits 5dcca9d + e4229fa, 2026-06-11): per-cascade
+  caster culling (cull kernel tests each instance vs all 4 cascade ortho
+  frusta, 1-frame stale +30 m slack; shadow-only sibling meshes on layers
+  2+c; cascade cameras get layers.enable(2+c) in Forests.update; main veg
+  meshes castShadow=false) + crown shadow proxies (80-tri ellipsoid+trunk,
+  FITTED per pool from R1 bbox union, species density 0.74-0.92, world-
+  anchored hash12(positionWorld) dither + crown-edge falloff; R1=cards+core,
+  R2=core only, impostor band 460-1100 m core-only w/ vegViewPos dist fade)
+  + world-metric PCSS penumbra (gap×tan(0.6°) clamped 0.05-3 m via cascade
+  camera refs). USER-REPORTED REGRESSION FIXED in e4229fa: giant blobby
+  flickery shadows in a circle around camera = class-max proxy dims +
+  screen-IGN dither swimming with cascade refits + 14-texel far-cascade
+  PCSS blur + hard R2 caster cutoff. PENDING user confirm: flicker gone
+  live. veg.cast HUD counter shows caster instances.
+- NOON FOREST LIGHT (same commits): probes are canopy-aware — chromatic
+  Beer-Lambert crown slab (CAN_SIGMA rgb, green passes 2×), translucent
+  crown glow term, litter albedo + sun/sky occlusion at covered hits,
+  ?ablate=canopygi for A/B; scatter+canopy now build BEFORE probes in
+  TerrainScene. GroundRing grass/debris get probe GI (were hemisphere-only
+  = pale glowing carpet in interiors) + shade-grown grass coloring under
+  canopy. Receiver canopy clamps softened 0.55/0.4 → 0.18/0.12. Caster
+  alpha cutout ?shadcut= default 0.35. Auto-exposure max gain 7→4 (dark
+  interiors stay dark — scene1 value structure). VERIFIED: probe field
+  dim-green under forest (?view=probes&ablate=veg,grass), shadow A/B diff
+  structured. Closed-canopy noon interiors are CORRECTLY flat-dim; dapple
+  pools need real crown gaps — judge gate framings at openings (ravine).
 - PHASE 5 GATE: repetition flight strip (2 km, no repeats/pop), throughput
-  floors (≥5M hero / ≥3M vista, HUD veg.tris + counters), forest-interior
-  re-judge vs scene1, DELTA.md Phase-5 loop (top-10 → fix top 3), DEVIATIONS
-  D-5 (cull granularity = instance, terrain-march occlusion in lieu of
-  depth Hi-Z; canopy-shadow approximations), gate sheet → shots/phase-5/.
+  floors (≥5M hero / ≥3M vista, HUD veg.tris + counters; hero framing
+  (-500,600,yaw 1.2) = 19.5M ✓; vista needs GROUND vista framing, the
+  1 km-alt default gives 130k veg tris), grass floor ≥800k blades (best
+  measured ~200k — find true meadow: scatter top-down shows tree-free
+  patch x∈[-1600,-1240] z∈[-690,115]; raise density/clump if short),
+  forest-interior re-judge vs scene1 at the KARST GORGE framing
+  (650,700,yaw 0.6 — scene1-analog bones: stream between walls; deltas:
+  bare smooth near terrain (BANNED within 10 m), bare gorge walls, no bank
+  grass), DELTA.md Phase-5 loop (top-10 → fix top 3), DEVIATIONS D-5 (cull
+  granularity = instance, terrain-march occlusion in lieu of depth Hi-Z;
+  canopy-shadow approximations: crown proxies + impostor band), gate sheet
+  → shots/phase-5/.
 - 5×-detail workstream (user nanite mandate), remaining: terrain
-  micro-displacement on near tiles (verify vs skirts), moss/ground-cover
-  volume geometry, per-cluster LOD for hero rocks/trunks if 460 m
-  transitions still show.
+  micro-displacement on near tiles (NEXT — fixes banned bare-smooth ground
+  at gorge framing; TerrainTiles positionNode after hSample, fade ≤~80 m,
+  biome-scaled amplitude, normal detail from pre-derived gradient texs in
+  TerrainMaterial), moss/ground-cover volume geometry, per-cluster LOD for
+  hero rocks/trunks if 460 m transitions still show.
 - **SHADOWS — SOLVED (user-confirmed live: "I SEE PLANT SHADOWS").** Root
   cause: applyDitherFade's ring-fade discard computed fade distance from TSL
   `cameraPosition`, which the SHADOW pass binds to the cascade shadow camera
@@ -423,3 +459,17 @@ split view, ground-clamped camera helper, silhouette/tiling gate + DELTA.md.
   don't" observations localized in minutes what ablate-matrix bisection
   (filter/post/GI/material/cascades) couldn't — ask WHICH objects differ,
   not WHICH pipeline stage.
+- Shadow-proxy lessons (user-reported "small objects, massive flickery
+  shadows in a circle"): (1) proxy dims must FIT the pool's real geometry
+  (class-max cull bounds oversize small variants ~2×); (2) NEVER dither
+  shadow casters with screen-space IGN — cascade boxes refit every frame
+  so the pattern swims = flicker; anchor dither in WORLD space
+  (hash12(positionWorld)); (3) texel-metric PCSS penumbra caps are
+  cascade-relative — 14 texels = 28 cm near, 21 m far; convert blur to
+  WORLD meters via reference('left/right/near/far', shadow.camera);
+  (4) any caster-reach cutoff by camera distance prints a visible CIRCLE
+  on the ground from altitude — fade casters out (impostor-band proxies
+  to 1.1 km), never hard-stop them.
+- An "identical render" after a lighting change usually means auto-exposure
+  re-normalized it away: judge lighting work by ablate A/B DIFFS and the
+  ?view=probes ambient view, not by absolute frame brightness.
