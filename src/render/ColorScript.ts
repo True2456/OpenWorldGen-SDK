@@ -30,7 +30,7 @@ const KEYFRAMES: Keyframe[] = [
   { t: 11, whiteBalance: [1.0, 1.0, 1.0], shadowTint: [0.92, 0.98, 1.06], shadowAmt: 0.28, highlightTint: [1.04, 1.01, 0.96], highlightAmt: 0.16, saturation: 0.99, contrast: 1.03 },
   { t: 15.5, whiteBalance: [1.01, 1.0, 0.99], shadowTint: [0.92, 0.98, 1.06], shadowAmt: 0.28, highlightTint: [1.05, 1.01, 0.95], highlightAmt: 0.18, saturation: 1.0, contrast: 1.03 },
   // golden — full teal–orange split per references
-  { t: 19.0, whiteBalance: [1.09, 1.0, 0.9], shadowTint: [0.8, 0.95, 1.14], shadowAmt: 0.5, highlightTint: [1.16, 1.02, 0.84], highlightAmt: 0.42, saturation: 1.07, contrast: 1.05 },
+  { t: 19.0, whiteBalance: [1.09, 1.0, 0.9], shadowTint: [0.72, 0.91, 1.2], shadowAmt: 0.58, highlightTint: [1.22, 1.03, 0.8], highlightAmt: 0.5, saturation: 1.09, contrast: 1.09 },
   // dusk
   { t: 20.6, whiteBalance: [0.95, 0.95, 1.06], shadowTint: [0.82, 0.92, 1.16], shadowAmt: 0.5, highlightTint: [1.08, 0.98, 0.9], highlightAmt: 0.3, saturation: 0.95, contrast: 1.05 },
   // wrap to night

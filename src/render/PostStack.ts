@@ -23,6 +23,7 @@ import {
   clamp,
   dot,
   float,
+  getScreenPosition,
   getViewPosition,
   instanceIndex,
   instancedArray,
@@ -37,7 +38,6 @@ import {
   screenUV,
   smoothstep,
   texture,
-  normalView,
   uniform,
   vec2,
   vec3,
@@ -46,7 +46,7 @@ import {
 } from 'three/tsl';
 import type { Engine } from '../core/Engine';
 import { hash12 } from '../gpu/noise/NoiseTSL';
-import type { NV3, NV4 } from '../gpu/TSLTypes';
+import type { NF, NV3, NV4 } from '../gpu/TSLTypes';
 import type { Atmosphere } from '../sky/Atmosphere';
 import { CLOUD_BOTTOM, CLOUD_TOP, type Clouds } from '../sky/Clouds';
 import { GradeUniforms, gradeParamsAt } from './ColorScript';
@@ -80,11 +80,15 @@ export class PostStack {
     const uCamPos = uniform(new Vector3());
     const uProjInv = uniform(new Matrix4());
     const uCamWorld = uniform(new Matrix4());
+    const uProj = uniform(new Matrix4());
+    const uView = uniform(new Matrix4());
     engine.onUpdate(() => {
       frameU.value = (frameU.value + 1) % 1024;
       uCamPos.value.copy(camera.position);
       uProjInv.value.copy(camera.projectionMatrixInverse);
       uCamWorld.value.copy(camera.matrixWorld);
+      uProj.value.copy(camera.projectionMatrix);
+      uView.value.copy(camera.matrixWorldInverse);
     });
     const camPosW = vec3(uCamPos);
 
@@ -92,13 +96,11 @@ export class PostStack {
     scenePass.setMRT(
       mrt({
         output,
-        normal: normalView,
         velocity,
       }),
     );
     const beauty = scenePass.getTextureNode('output');
     const depthTex = scenePass.getTextureNode('depth');
-    const normalTex = scenePass.getTextureNode('normal');
     const velocityTex = scenePass.getTextureNode('velocity');
 
     // --- half-res volumetric cloud layer (own quad pass) -----------------------
@@ -207,8 +209,11 @@ export class PostStack {
     })();
 
     // --- GTAO (full res: resolutionScale 0.5 produced row-streak artifacts) ------
-    // defaults are mesh-viewer scale: 16 samples cost ~50 ms on terrain vistas
-    const aoPass = ao(depthTex, normalTex, camera);
+    // defaults are mesh-viewer scale: 16 samples cost ~50 ms on terrain vistas.
+    // Normals = null → derived from depth: material normals carry strong
+    // far-detail perturbation that disagrees with depth geometry — GTAO's
+    // cones bent into the surface and printed black facets on steep ridges.
+    const aoPass = ao(depthTex, null as unknown as typeof depthTex, camera);
     const aoCfg = aoPass as unknown as {
       samples: { value: number };
       radius: { value: number };
@@ -217,9 +222,58 @@ export class PostStack {
     aoCfg.samples.value = 8;
     aoCfg.radius.value = 1.6;
     aoCfg.distanceFallOff.value = 0.6;
+    // AO is a near-field cue — fade it out with distance (far AO from a
+    // 1.6 m radius is subpixel anyway and only adds instability)
+    const aoFaded = Fn((): NF => {
+      const dist = getViewPosition(screenUV, depthTex.x, uProjInv).length();
+      const k = smoothstep(700, 1800, dist);
+      return mix(aoPass.getTextureNode().x, float(1), k);
+    })();
+    // --- screen-space contact shadows (spec §2 floor) ---------------------------
+    // Short depth-buffer march toward the sun: picks up the ~0.1–2 m contact
+    // occlusion the 2048² cascades can't resolve. Near field only; floored so
+    // it stays a contact CUE (never pitch black — no-black-shadows law).
+    const SSCS_STEPS = 12;
+    const contactNode = Fn((): NF => {
+      const result = float(1).toVar();
+      const d = depthTex.x;
+      const isSky = d.lessThanEqual(1e-7).or(d.greaterThanEqual(0.9999999));
+      const viewPos = getViewPosition(screenUV, d, uProjInv);
+      const dist = viewPos.length();
+      If(isSky.not().and(dist.lessThan(240)), () => {
+        const sunW = vec3(atmosphere.sunDir).normalize();
+        const sunV = uView.mul(vec4(sunW, 0)).xyz;
+        const jit = hash12(screenUV.mul(vec2(517.7, 893.3)).add(float(frameU).mul(0.7548)))
+          .mul(0.8)
+          .add(0.4);
+        const range = float(1.7);
+        const occl = float(0).toVar();
+        for (let s = 1; s <= SSCS_STEPS; s++) {
+          // quadratic step distribution: dense near the surface
+          const f = (s / SSCS_STEPS) ** 1.6;
+          const sampleV = viewPos.add(sunV.mul(range).mul(jit).mul(f));
+          const uvS = getScreenPosition(sampleV, uProj);
+          const inFrame = uvS.x
+            .greaterThan(0.001)
+            .and(uvS.x.lessThan(0.999))
+            .and(uvS.y.greaterThan(0.001))
+            .and(uvS.y.lessThan(0.999));
+          const dS = texture(depthTex.value, uvS).x;
+          const bufV = getViewPosition(uvS, dS, uProjInv);
+          const dz = bufV.z.sub(sampleV.z); // >0: buffer closer to camera
+          const hit = dz.greaterThan(0.05).and(dz.lessThan(1.4)).and(inFrame);
+          occl.assign(occl.max(hit.select(float(1).sub(float(f).mul(0.5)), float(0))));
+        }
+        // distance fade + floor
+        const fade = smoothstep(240, 140, dist);
+        result.assign(float(1).sub(occl.mul(0.6).mul(fade)));
+      });
+      return result;
+    })();
+
     const withAO = ablate.has('ao')
       ? aerialNode
-      : aerialNode.mul(aoPass.getTextureNode().x);
+      : aerialNode.mul(aoFaded).mul(ablate.has('contact') ? float(1) : contactNode);
 
     // --- TRAA ----------------------------------------------------------------------
     const taaed = ablate.has('taa')
@@ -265,7 +319,9 @@ export class PostStack {
         }
       }
       const avgLum = exp2(logSum.div(wTot));
-      const target = clamp(float(0.16).div(avgLum), 0.18, 7.0);
+      // key 0.125: auto-exposure was normalizing the frame to a washy mid-gray
+      // (it silently cancels albedo changes too — grade/key are the levers)
+      const target = clamp(float(0.125).div(avgLum), 0.18, 7.0);
       const prev = this.exposureBuf.element(0);
       this.exposureBuf.element(0).assign(mix(prev, target, 0.07));
     })().compute(1);

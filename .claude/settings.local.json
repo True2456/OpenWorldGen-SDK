@@ -34,7 +34,11 @@
       "Bash(curl -s \"http://localhost:5173/src/render/PostStack.ts\")",
       "Bash(python3 *)",
       "Bash(git commit -q -m 'Erosion + meshing rework per user feedback: organic channels, skirted adaptive tiles *)",
-      "Bash(git commit -q -m 'Clouds: default coverage 0.62 *)"
+      "Bash(git commit -q -m 'Clouds: default coverage 0.62 *)",
+      "Bash(curl -s \"http://localhost:5173/src/render/TerrainMaterial.ts\")",
+      "Bash(md5 shots/wip/shadowcolor.png shots/wip/shadowcolor2.png shots/wip/streak-cov0.png shots/wip/streak-noshadow.png shots/wip/streak-final.png)",
+      "Bash(awk -F'= ' '{print $2, $1}')",
+      "Bash(git commit -q -m 'Phase 2 CLOSE: golden-hour gate passed vs Witcher ref; shadow-color test passed *)"
     ]
   }
 }

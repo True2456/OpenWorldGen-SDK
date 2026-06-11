@@ -191,7 +191,11 @@ export class TerrainTiles {
       0,
       1,
     );
-    const farH = mix(baked, farMacro.height, edgeBlend).sub(2.5);
+    // sit well below the tile mesh inside the world (coarse far tiles deviate
+    // several meters — the shell poked through and showed far-mode shading)
+    const farH = mix(baked, farMacro.height, edgeBlend).sub(
+      mix(float(9), float(2.5), edgeBlend),
+    );
     farMat.positionNode = vec3(fxz.x, farH, fxz.y);
     // analytic per-vertex normal (no baked maps beyond the world edge):
     // finite-difference the far macro height, interpolated via varying

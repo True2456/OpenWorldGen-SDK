@@ -62,10 +62,15 @@ feedback comes in chat; the two-frame test is the agent-side acceptance only.
       far-detail normal synthesis, PBR splat material (strata/iron bands/lichen/macro variation/
       wet darkening/snow), erosion split view, ground-clamped camera (`x/z/alt/yaw`), CPU height
       readback. Gates passed; see docs/DELTA.md Phase 1. Artifacts: shots/phase-1/.
-- [ ] **Phase 2** — Hillaire LUT atmosphere + aerial perspective; EV auto-exposure; IBL from sky;
-      CSM×4 + PCSS + screen-space contact shadows; volumetric clouds + temporal reproj + cloud
-      shadows; TAA, GTAO, bloom, per-ToD filmic grade (teal-orange golden). Gate: golden vista vs
-      Witcher ref; shadow-color test.
+- [x] **Phase 2** — DONE 2026-06-11. Hillaire LUT atmosphere + aerial perspective (post-pass
+      camera-uniform bug fixed — explicit uCamPos/uProjInv/uCamWorld); GPU auto-exposure
+      (key 0.125); hemisphere ambient (IBL env path dead → Phase 3 probes); CSM×4 + PCSS +
+      screen-space contact shadows (12-step depth march, near-field, floored); volumetric
+      clouds (half-res RTT march, baked weather, cloud sea below summits + cloud shadow map);
+      TRAA, GTAO (depth-derived normals, distance-faded), bloom, per-ToD grade (strong
+      teal-orange golden split). Gates PASSED: golden vista vs Witcher (DELTA.md Phase 2,
+      ~70% of ref without vegetation), shadow-color test (chroma 18.3/255, no gray).
+      Artifacts: shots/phase-2/. Known debts → DELTA items 1,4,7–10.
 - [ ] **Phase 3** — irradiance probe clipmap (GPU, time-sliced, sky+sun+bounce), GTAO tuning,
       screen-space bounce, foliage translucency. Gate: forest interior vs scene1; no-black-shadows.
 - [ ] **Phase 4** — generators: 6+ tree species (per-instance growth), rocks/cliffs, grass, ferns,
@@ -118,21 +123,29 @@ RenderPipeline.outputNode → explicit uCamPos/uProjInv/uCamWorld uniforms now) 
 Aerial perspective only became truly distance-correct with the same fix.
 `?cloudview=1..9` probe ladder kept (tone mapping auto-off when probing).
 
-REMAINING for Phase 2 close:
-- Cloud ART pass: recalibrate weather→coverage so default ~0.5 gives scattered cumulus
-  (currently needs ?cov=0.6–0.75 to look populated); lighting punch (sun silver lining);
-  cloud-sea-below-summits composition for the Witcher golden-hour gate.
-- Screen-space contact shadows post node.
-- Black faceted shadow patches on some peaks (PCSS at grazing angles) — fix before gate.
-- Golden-hour gate vs Witcher ref + shadow-color test (16 px chroma sample), DELTA.md
-  Phase 2 + fix top 3, commit, task #3 done.
+PHASE 2 CLOSED 2026-06-11 (see checklist + DELTA.md). All listed items landed: cloud art
+pass (contrast-stretched weather, isotropic phase floor, base-darkened ambient, default
+cov 0.62), contact shadows (?ablate=contact to A/B), black facets root-caused to GTAO
+(NOT PCSS — depth-derived normals fixed it), gate + shadow-color test PASSED.
+
+**Phase 3 — GI: irradiance probe clipmap, indirect-only GTAO, screen-space bounce,
+foliage translucency prep.** Starting state: hemisphere ambient stopgap lives in
+SunSky (intensity SUN_E·(0.085+0.1·day)); scene.environment CubeCamera path exists but
+contributes ~nothing (known dead). Probes replace BOTH.
 
 ## Next actions (always keep current)
 
-- Cloud coverage/lighting art pass (see above), then contact shadows, then gate battery.
-- KNOWN visual debts: washy/low-contrast grade (tune at gate); IBL env path dead
-  (hemisphere covers); snow sparse on S hero face; kettle-pond field density (re-judge
-  after Phase 6 water); terrain tris 20 M at massif view (shadow-pass culling in Ph 5).
+- Phase 3 design: probe volume covering the 4 km world (clipmap around camera per spec
+  §2 ≥24×24×6/chunk — interpret as world-space clipmap L0 ~2 m spacing near camera).
+  Bake path: GPU time-sliced — N probes/frame, each gathers sky visibility + sun bounce
+  from the heightfield (terrain-only world: heightfield ray march suffices — no meshes
+  yet!). Store SH-L1 or ambient-cube in 3D textures; sample in materials as ambient
+  term replacing hemisphere; keep hemisphere as outer-fallback.
+- Then: GTAO multiplies indirect only (needs separating direct/indirect — restructure
+  lighting or accept approximation); screen-space directional bounce kicker.
+- KNOWN visual debts (carried): DELTA Phase-2 items 1 (vegetation), 4 (2nd cloud
+  layer), 7 (gate framing anchor), 9 (AgX toe desat), 10 (god rays); kettle-pond
+  density (Phase 6); terrain 20 M tris at massif views (shadow culling, Phase 5).
 
 ## Key decisions log
 

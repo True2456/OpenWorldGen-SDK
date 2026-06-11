@@ -199,7 +199,8 @@ export class Clouds {
     // cumulus masses with clear lanes (baked texture — fbm here was the
     // hottest math in the march: 40 steps × 4 sun taps × 3 octaves)
     const wUv = wp.xz.div(WEATHER_WORLD).add(0.5).fract();
-    const weather = texture(this.weatherMap, wUv, 0).x;
+    // contrast-stretch: raw fbm hovers near 0.5 — dense cores + clear lanes
+    const weather = smoothstep(0.3, 0.78, texture(this.weatherMap, wUv, 0).x);
     const cov = clamp(weather.sub(float(1).sub(float(this.coverage))), 0, 1).mul(2.2);
     const base = texture3D(this.baseNoise, wp.div(3600).fract(), 0).x;
     let dens = clamp(base.mul(cov).sub(float(0.32).mul(hNorm.add(0.45))), 0, 1).mul(inLayer);
@@ -257,7 +258,8 @@ export class Clouds {
         pow(float(1 + gg).sub(nu.mul(2 * g)), 1.5),
       );
     };
-    const phase = hg(g1).mul(0.75).add(hg(g2).mul(0.25));
+    // isotropic floor ≈ multiple scattering (clouds are never phase-black)
+    const phase = hg(g1).mul(0.75).add(hg(g2).mul(0.25)).add(0.14);
     const sunT = this.atmosphere.sampleTransmittance(float(6360.35), clamp(sunDir.y, -1, 1));
 
     If(valid, () => {
@@ -274,12 +276,18 @@ export class Clouds {
           }
           const sunVis = exp(lTau.mul(-0.04));
           const powder = float(1).sub(exp(dens.mul(-22)));
+          // ambient sees less sky toward the cloud base
+          const hn = clamp(
+            sp.y.sub(CLOUD_BOTTOM).div(CLOUD_TOP - CLOUD_BOTTOM),
+            0,
+            1,
+          );
           // source radiance: sun (phase-weighted, self-occluded) + sky ambient
           const S = sunT
             .mul(sunVis)
             .mul(phase)
-            .mul(SUN_E * 2.6)
-            .add(ambient.mul(0.22))
+            .mul(SUN_E * 3.4)
+            .add(ambient.mul(hn.mul(0.55).add(0.45)).mul(0.38))
             .mul(powder.mul(0.75).add(0.25));
           const stepT = exp(dens.mul(seg).mul(-0.052));
           light.addAssign(S.mul(trans).mul(float(1).sub(stepT)));

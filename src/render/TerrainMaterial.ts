@@ -38,7 +38,7 @@ import {
   PERIOD_VAL,
 } from '../gpu/passes/NoiseBake';
 import { zoneMasks, type MacroParams } from '../world/MacroMap';
-import { LAKE_LEVEL, WORLD_SIZE } from '../world/WorldConst';
+import { LAKE_LEVEL, WORLD_HALF, WORLD_SIZE } from '../world/WorldConst';
 
 export interface TerrainShadingInputs {
   /** rgba16f: xyz world normal, w slope */
@@ -98,13 +98,26 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   const baseNormal = ns.xyz.normalize().toVar();
   const slope = ns.w.toVar();
   const bio = texture(inp.biomeTex, uv);
-  const snowField = bio.g;
-  const vegDensity = bio.b;
-  const rockExposure = bio.a;
   const fields = texture(inp.fieldsTex, uv);
-  const moisture = fields.x;
-  const flowStrength = fields.y;
-  const riverDepth = fields.z;
+  // Beyond the world edge the baked maps clamp to their last texel row and
+  // SMEAR it radially across the vista shell (pale streaks). Cross-fade to
+  // procedural estimates outside the domain (far shell only).
+  const outsideK = inp.far
+    ? smoothstep(
+        WORLD_HALF * 0.96,
+        WORLD_HALF * 1.0,
+        wxz.abs().x.max(wxz.abs().y),
+      )
+    : float(0);
+  const snowProc = smoothstep(950, 1300, h.add(valS(620, 0.23, 0.57).mul(140)));
+  const vegProc = smoothstep(0.55, 0.28, slope).mul(smoothstep(1350, 900, h));
+  const rockProc = smoothstep(0.55, 0.95, slope);
+  const snowField = mix(bio.g, snowProc, outsideK);
+  const vegDensity = mix(bio.b, vegProc, outsideK);
+  const rockExposure = mix(bio.a, rockProc, outsideK);
+  const moisture = mix(fields.x, float(0.35), outsideK);
+  const flowStrength = mix(fields.y, float(0), outsideK);
+  const riverDepth = mix(fields.z, float(0), outsideK);
   const zm = zoneMasks(wxz, inp.mp);
 
   // ---------- macro variation (2–50 m breakup — tiling killer) ----------------
@@ -123,13 +136,16 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   const strataPhase = h
     .mul(0.028)
     .add(valS(74, 0.11, 0.83).mul(3.6))
-    .add(valS(540, 0.43, 0.29).mul(2.4));
+    .add(valS(540, 0.43, 0.29).mul(2.4))
+    .add(valS(27, 0.91, 0.07).mul(1.3)); // fine jitter fragments the bands
   const strata = band(strataPhase, valS(610, 0.67, 0.41).mul(1.7).add(31.7))
-    .mul(0.55)
-    .add(0.22); // compress contrast
-  const alpRock = mix(vec3(0.35, 0.26, 0.2), vec3(0.5, 0.41, 0.34), strata);
-  const karstRock = mix(vec3(0.44, 0.44, 0.42), vec3(0.58, 0.56, 0.52), strata);
-  const genericRock = mix(vec3(0.4, 0.38, 0.35), vec3(0.49, 0.47, 0.43), strata);
+    .mul(0.36)
+    .add(0.3); // compress contrast — long smooth walls turn 'layer cake' fast
+  // reference peaks are DARK: gray-blue mass with rust faces catching light —
+  // pale palettes washed the whole massif into cream at golden hour
+  const alpRock = mix(vec3(0.16, 0.135, 0.125), vec3(0.38, 0.26, 0.18), strata);
+  const karstRock = mix(vec3(0.3, 0.3, 0.29), vec3(0.5, 0.48, 0.44), strata);
+  const genericRock = mix(vec3(0.26, 0.245, 0.225), vec3(0.42, 0.39, 0.35), strata);
   let rockCol = mix(genericRock, karstRock, zm.tKarst);
   rockCol = mix(rockCol, alpRock, zm.tAlp.mul(0.85));
   // iron-oxide bands: dark rust layers at noise-chosen elevations (refs show
@@ -177,14 +193,19 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
     .mul(smoothstep(0.9, 0.45, slope))
     .mul(smoothstep(0.25, 0.6, moisture.add(zm.tKarst.mul(0.3))))
     .mul(rockW.oneMinus());
-  const riverW = smoothstep(0.12, 0.5, flowStrength).mul(smoothstep(0.45, 0.2, slope));
+  // gravel only for REAL channels on open ground: weak-flow rills under
+  // grass painted pale streaks down every meadow hillside — those should
+  // darken via moisture instead
+  const riverW = smoothstep(0.3, 0.68, flowStrength)
+    .mul(smoothstep(0.45, 0.2, slope))
+    .mul(grassW.mul(0.75).oneMinus());
 
   // snow with hash-dithered edge (reads as crisp organic boundary, not
   // gradient). Dither only near the boundary — ungated it sprinkled white
   // pixels over bare rock wherever snowField hovered above zero.
   const ditherGate = smoothstep(0.06, 0.22, snowField).mul(smoothstep(0.95, 0.6, snowField));
   const dither = hash12(wxz.mul(7.31)).sub(0.5).mul(0.34).mul(ditherGate);
-  const snowW = smoothstep(0.2, 0.58, snowField.add(dither)).toVar();
+  const snowW = smoothstep(0.16, 0.5, snowField.add(dither)).toVar();
 
   // ---------- composite -----------------------------------------------------------
   // standing water (kettle ponds, lake) — dark sediment + sky-ish film until
@@ -218,7 +239,12 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   // pre-baked ridged gradient at 310 m features; ×44 ≈ the old ±22 m
   // finite-difference amplitude (×2: baked noise is [0,1], mx was [-1,1])
   const rg = ridG(310).mul(44 * 2);
-  const farAmp = smoothstep(0.5, 1.1, slope).mul(0.4).add(0.08).mul(farK);
+  // crag synthesis belongs to ROCK faces — on smooth vegetated hills the
+  // ridged gradient field printed parallel pale corrugation streaks
+  const farAmp = smoothstep(0.5, 1.1, slope)
+    .mul(0.4)
+    .add(smoothstep(0.32, 0.7, slope).mul(0.08))
+    .mul(farK);
   // never let detail flip the surface away from the sky
   const perturbed = baseNormal.add(vec3(rg.x, 0, rg.y).mul(farAmp));
   let nrm: NV3 = vec3(perturbed.x, perturbed.y.max(0.1), perturbed.z).normalize();
