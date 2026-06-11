@@ -78,6 +78,8 @@ export class Heightfield {
   biomeTex: StorageTexture | null = null;
   /** CPU height mirror for camera clamping / tools (filled by readback) */
   cpuHeights: Float32Array | null = null;
+  /** CPU waterY mirror (sim res) — underwater camera guard */
+  cpuWaterY: Float32Array | null = null;
 
   /** r32float height texture (nearest-sample / textureLoad only) */
   readonly heightTex: StorageTexture;
@@ -187,6 +189,8 @@ export class Heightfield {
     progress(0.93, 'terrain: height readback for camera');
     const ab = await renderer.getArrayBufferAsync(hf.height.value);
     hf.cpuHeights = new Float32Array(ab);
+    const wab = await renderer.getArrayBufferAsync(hf.waterY.value);
+    hf.cpuWaterY = new Float32Array(wab);
     return hf;
   }
 
@@ -202,6 +206,24 @@ export class Heightfield {
     const fx = gx - x0;
     const fz = gz - z0;
     const i = (xx: number, zz: number): number => hts[Math.min(zz, res - 1) * res + Math.min(xx, res - 1)] ?? 0;
+    const a = i(x0, z0) * (1 - fx) + i(x0 + 1, z0) * fx;
+    const b = i(x0, z0 + 1) * (1 - fx) + i(x0 + 1, z0 + 1) * fx;
+    return a * (1 - fz) + b * fz;
+  }
+
+  /** CPU waterY lookup (bilinear, sim res) — dry cells sit ~2 m below the
+   *  bed, so `max(ground, waterYAtCpu + ε)` is a safe camera floor */
+  waterYAtCpu(x: number, z: number): number {
+    const wy = this.cpuWaterY;
+    if (!wy) return -1e4;
+    const res = this.simRes;
+    const gx = Math.min(Math.max(((x / WORLD_SIZE) + 0.5) * res - 0.5, 0), res - 1.001);
+    const gz = Math.min(Math.max(((z / WORLD_SIZE) + 0.5) * res - 0.5, 0), res - 1.001);
+    const x0 = Math.floor(gx);
+    const z0 = Math.floor(gz);
+    const fx = gx - x0;
+    const fz = gz - z0;
+    const i = (xx: number, zz: number): number => wy[Math.min(zz, res - 1) * res + Math.min(xx, res - 1)] ?? -1e4;
     const a = i(x0, z0) * (1 - fx) + i(x0 + 1, z0) * fx;
     const b = i(x0, z0 + 1) * (1 - fx) + i(x0 + 1, z0 + 1) * fx;
     return a * (1 - fz) + b * fz;

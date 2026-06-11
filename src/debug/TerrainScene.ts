@@ -13,7 +13,8 @@ import { addScatterDebug } from './ScatterDebug';
 import { Forests } from '../vegetation/Forests';
 import { GroundRing } from '../vegetation/GroundRing';
 import { buildVegLibrary } from '../vegetation/VegLibrary';
-import { updateSunUniforms } from '../render/VegMaterials';
+import { CausticsBake, setCausticContext } from '../render/Caustics';
+import { sunU, updateSunUniforms } from '../render/VegMaterials';
 import { buildCanopyShell } from '../world/CanopyShell';
 import { Heightfield } from '../world/Heightfield';
 import { buildTerrainShadowProxy } from '../world/ShadowProxy';
@@ -80,6 +81,17 @@ export async function buildTerrainScene(ctx: WorldContext): Promise<void> {
   await gi.init(engine.renderer);
   sunSky.dimAmbientForGI();
   engine.onUpdate(() => gi.tick(engine.renderer));
+
+  // Phase 6 caustics: per-frame analytic bake + module context — MUST be
+  // set before any material factory runs (terrain tiles, rocks, debris all
+  // self-apply at build time). ?ablate=caustics to A/B, ?caustk=N to tune.
+  if (!ablate.has('caustics')) {
+    const bake = new CausticsBake();
+    const ck = Number(new URLSearchParams(window.location.search).get('caustk') ?? NaN);
+    if (Number.isFinite(ck)) bake.focusK.value = ck;
+    setCausticContext({ hf, bake, sunDir: sunU.dir });
+    engine.onUpdate(() => bake.update(engine.renderer));
+  }
 
   ctx.progress(0.958, 'terrain: building tiles');
   const view = new URLSearchParams(window.location.search).get('view');
@@ -210,11 +222,15 @@ export async function buildTerrainScene(ctx: WorldContext): Promise<void> {
       engine.camera.lookAt(0, 350, -300);
     }
   }
-  // soft ground collision for fly camera
+  // soft ground collision for fly camera + underwater guard (no underwater
+  // rendering exists: the refraction texture above the surface is garbage
+  // from below — hold the eye just above the water instead)
   engine.onUpdate(() => {
     const c = engine.camera.position;
     const ground = hf.heightAtCpu(c.x, c.z) + 1.4;
     if (c.y < ground) c.y = ground;
+    const wsurf = hf.waterYAtCpu(c.x, c.z) + 0.45;
+    if (c.y < wsurf) c.y = wsurf;
   });
 
   ctx.progress(1, 'terrain ready');

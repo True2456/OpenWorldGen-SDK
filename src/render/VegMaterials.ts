@@ -26,6 +26,7 @@ import {
 } from 'three/tsl';
 import { fbm3, valueNoise3 } from '../gpu/noise/NoiseTSL';
 import type { NF, NV3, NV4 } from '../gpu/TSLTypes';
+import { applyCaustics } from './Caustics';
 
 /**
  * Shared sun uniforms for the foliage translucency term (D-2). Updated by
@@ -172,6 +173,8 @@ export function rockMaterial(opts?: {
   mat.colorNode = albedo.mul(d.w.mul(0.35).add(0.65));
   mat.aoNode = d.w;
   mat.metalness = 0;
+  // submerged boulders / streambed cobbles dance with the water caustics
+  applyCaustics(mat);
   return mat;
 }
 
@@ -197,6 +200,8 @@ export function deadwoodMaterial(
   // rot darkening for heavily decayed wood
   albedo = albedo.mul(float(1).sub(d.z.mul(0.25))) as unknown as NV3;
   mat.colorNode = hueShift(albedo, d.x, 0.1);
+  // logs lying across streams sit in the caustic band
+  applyCaustics(mat);
   mat.normalNode = normalMap(vec3(b.x, b.y, 1));
   mat.aoNode = a.w;
   mat.roughnessNode = mix(b.z, float(1), moss);

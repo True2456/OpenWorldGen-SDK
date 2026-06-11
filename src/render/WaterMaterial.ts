@@ -39,7 +39,6 @@ import {
   clamp,
   exp,
   float,
-  floor,
   fract,
   getScreenPosition,
   interleavedGradientNoise,
@@ -63,7 +62,7 @@ import {
 } from 'three/tsl';
 import type { StorageTexture } from 'three/webgpu';
 import { PERIOD_FBM } from '../gpu/passes/NoiseBake';
-import type { Vec2Buffer } from '../gpu/passes/FlowRivers';
+import { bilerpVec2Buffer } from '../gpu/BufferSample';
 import { canopyAt } from '../gpu/passes/Scatter';
 import type { NF, NI, NV2, NV3, NV4 } from '../gpu/TSLTypes';
 import type { Atmosphere } from '../sky/Atmosphere';
@@ -72,6 +71,9 @@ import { WORLD_HALF } from '../world/WorldConst';
 
 /** clear alpine water: absorption per meter (r dies first → teal depths) */
 const SIGMA = { r: 0.42, g: 0.135, b: 0.095 };
+
+/** flowmap cycles/s — shared by ripples, foam and the caustic advection */
+export const FLOW_CYC = 0.45;
 
 export interface WaterLevelHandles {
   /** snapped world origin of this clipmap level (uniform, updated per frame) */
@@ -83,22 +85,6 @@ export interface WaterLevelHandles {
   /** coarse level → sample the min-reduced far field (narrow channels
    *  vanish at distance instead of stretching across whole cells) */
   far: boolean;
-}
-
-/** bilinear sample of the sim-res vec2 flow buffer (direction × speed) */
-function bilerpFlow(buf: Vec2Buffer, res: number, g: NV2): NV2 {
-  const gc = clamp(g, 0, res - 1);
-  const i0 = floor(gc);
-  const f = gc.sub(i0);
-  const x0 = i0.x.toInt();
-  const y0 = i0.y.toInt();
-  const x1 = clamp(i0.x.add(1), 0, res - 1).toInt();
-  const y1 = clamp(i0.y.add(1), 0, res - 1).toInt();
-  const s00 = buf.element(y0.mul(res).add(x0)) as unknown as NV2;
-  const s10 = buf.element(y0.mul(res).add(x1)) as unknown as NV2;
-  const s01 = buf.element(y1.mul(res).add(x0)) as unknown as NV2;
-  const s11 = buf.element(y1.mul(res).add(x1)) as unknown as NV2;
-  return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
 }
 
 export function waterMaterial(
@@ -137,7 +123,7 @@ export function waterMaterial(
   // ---- flow field --------------------------------------------------------------
   const simRes = hf.simRes;
   const g = clamp(positionWorld.xz.div(4096).add(0.5), 0, 1).mul(simRes).sub(0.5);
-  const flowV = bilerpFlow(flow.flowDir, simRes, g);
+  const flowV = bilerpVec2Buffer(flow.flowDir, simRes, g);
   const spd = flowV.length();
   const fdir = flowV.div(spd.max(1e-4));
 

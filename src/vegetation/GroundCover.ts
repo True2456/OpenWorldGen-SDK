@@ -24,6 +24,7 @@ import { MeshStandardNodeMaterial } from 'three/webgpu';
 import { attribute, float, mix, smoothstep, texture, uv, vec3 } from 'three/tsl';
 import type { Rng } from '../core/Seed';
 import type { NF, NV3, NV4 } from '../gpu/TSLTypes';
+import { applyCaustics } from '../render/Caustics';
 import { grassTranslucency } from '../render/VegMaterials';
 import { MeshGrower } from './TubeMesh';
 
@@ -261,6 +262,7 @@ export function debrisMaterial(kind: 'twig' | 'chip'): MeshStandardNodeMaterial 
   const d = attribute('vdata', 'vec4') as unknown as NV4;
   const base = kind === 'twig' ? vec3(0.1, 0.075, 0.05) : vec3(0.085, 0.06, 0.04);
   mat.colorNode = base.mul(d.x.mul(0.2).add(1)).mul(d.w);
+  applyCaustics(mat); // twigs settle in streambeds
   mat.roughness = 0.95;
   mat.metalness = 0;
   mat.side = DoubleSide;
@@ -279,6 +281,7 @@ export function litterMaterial(atlas: Texture): MeshStandardNodeMaterial {
     float(0.5),
   );
   mat.colorNode = browned;
+  applyCaustics(mat); // drowned litter in stream margins
   mat.opacityNode = t.w;
   mat.alphaTest = 0.32;
   mat.roughness = 0.92;

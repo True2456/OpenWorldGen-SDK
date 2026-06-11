@@ -38,6 +38,14 @@ import {
   vec4,
 } from 'three/tsl';
 import type { ProbeGI } from '../gpu/passes/ProbeGI';
+import type { NV4 } from '../gpu/TSLTypes';
+import {
+  CAUSTIC_TILE,
+  causticContext,
+  causticDepth,
+  causticTint,
+  causticTintParts,
+} from '../render/Caustics';
 import { DISP, buildTerrainShading } from '../render/TerrainMaterial';
 import { PERIOD_FBM, PERIOD_RID, PERIOD_VAL } from '../gpu/passes/NoiseBake';
 import type { Heightfield } from './Heightfield';
@@ -189,6 +197,26 @@ export class TerrainTiles {
     mat.normalNode = shading.normalNode;
     mat.roughnessNode = shading.roughnessNode;
     mat.metalnessNode = float(0);
+    // Phase 6 water response (near tiles only): capillary-wet band hugging
+    // the true waterline (the splat's moisture wetness is sim-res blurry)
+    // + animated caustics on submerged beds. d = water column above the
+    // fragment; the band covers d ∈ (−0.45, 0) and saturates under water.
+    const cctx = causticContext();
+    if (cctx && !opts.neutral) {
+      const d = causticDepth(positionWorld);
+      const fringe = smoothstep(-0.45, -0.04, d);
+      const caust = causticTint(positionWorld, d);
+      mat.colorNode = shading.colorNode
+        .mul(fringe.mul(0.38).oneMinus())
+        .mul(caust.mul(2.2).add(1));
+      mat.roughnessNode = shading.roughnessNode.sub(fringe.mul(0.42)).clamp(0.18, 1);
+      // ?caustlit=1 — paint the lit graph's own caustic chain (triage):
+      // r = gated tint×4, g = gate product, b = ungated pattern
+      if (new URLSearchParams(window.location.search).get('caustlit') === '1') {
+        const parts = causticTintParts(positionWorld, d);
+        mat.emissiveNode = vec3(parts.x.mul(4), parts.y, parts.z);
+      }
+    }
     // ?dispdbg=1 — paint micro-displacement (green=+, red=−, dark=none);
     // must land AFTER the shading assignment or it gets overwritten
     if (new URLSearchParams(window.location.search).get('dispdbg') === '1') {
@@ -229,6 +257,27 @@ export class TerrainTiles {
         lod.mul(0.3719).add(0.41).fract(),
         lod.mul(0.7177).add(0.79).fract(),
       ).mul(grid);
+    }
+    if (debugView === 'caust' && cctx) {
+      // raw caustic tile painted on the terrain (bake verification);
+      // ?caustmip=N forces a mip bias — verifies the auto-generated chain
+      // that depth-defocus sampling depends on (black ⇒ mips never built)
+      const mip = Number(
+        new URLSearchParams(window.location.search).get('caustmip') ?? '0',
+      );
+      mat.colorNode = vec3(0.0);
+      mat.emissiveNode = vec3(
+        (
+          texture(cctx.bake.tex, positionWorld.xz.div(CAUSTIC_TILE)).bias(
+            float(mip),
+          ) as unknown as NV4
+        ).x,
+      );
+    }
+    if (debugView === 'caust2' && cctx) {
+      // tint triage: r = gated tint, g = gate product, b = ungated pattern
+      mat.colorNode = vec3(0.0);
+      mat.emissiveNode = causticTintParts(positionWorld);
     }
     if ((debugView === 'snow' || debugView === 'bioR' || debugView === 'bioB') && hf.biomeTex) {
       // single-channel classification view: white = channel value

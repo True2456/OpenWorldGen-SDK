@@ -240,8 +240,8 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   const snowW = smoothstep(0.16, 0.5, snowField.add(dither)).toVar();
 
   // ---------- composite -----------------------------------------------------------
-  // standing water (kettle ponds, lake) — dark sediment + sky-ish film until
-  // Phase 6 real water; painting these as bright gravel read as gray blobs
+  // standing-water beds (kettle ponds, lake): fine dark silt, not gravel —
+  // the real Phase-6 water surface + Beer–Lambert absorption sit above this
   const pondK = smoothstep(1.1, 2.6, riverDepth).mul(smoothstep(0.3, 0.12, slope));
   let col: NV3 = soil;
   col = mix(col, grassCol, grassW);
@@ -249,7 +249,7 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   col = mix(col, scree, screeW);
   col = mix(col, rockCol, rockW);
   col = mix(col, gravel, riverW.mul(0.85).mul(pondK.oneMinus()));
-  col = mix(col, vec3(0.045, 0.075, 0.07), pondK);
+  col = mix(col, vec3(0.055, 0.052, 0.038), pondK);
   col = mix(col, snowCol, snowW);
   col = col.mul(macroTint.add(1));
 
