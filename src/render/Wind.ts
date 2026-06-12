@@ -170,17 +170,20 @@ export function vegWindOffset(a: WindVertexArgs): NV3 {
   const branch = gL.sub(0.45).mul(flex).mul(s).mul(eks).mul(0.55).mul(brAtten);
 
   // 4) aperiodic micro-flutter: advected fbm GRADIENTS (zero-mean, two
-  // independent axes in one tap), decorrelated per vertex by vdata.z
+  // independent axes in one tap), decorrelated per vertex by vdata.z.
+  // Leaf flutter is a SHIMMER, not a shake: a few cm at the tips, features
+  // ~6 m advected slowly (~0.75 Hz) — the first cut (±12 cm, 3–4 Hz
+  // decorrelation) read as "leaves shaking wildly" (user)
   const flutAtten = float(1).sub(a.dist.sub(40).div(80).clamp(0, 1));
   const pF = a.origin.xz
     .add(vd.z.mul(vec2(37.1, 17.7)))
     .add(vec2(a.instPhase.mul(91), 0))
-    .sub(d.mul(time.mul(11)))
-    .div(3.2 * PERIOD_FBM);
+    .sub(d.mul(time.mul(4.5)))
+    .div(6 * PERIOD_FBM);
   const fl = texture(ctx.noiseA, pF, 0) as unknown as NV4;
-  const flutA = s.mul(g.mul(0.7).add(0.3)).mul(eks).mul(flex).mul(0.3).mul(flutAtten);
-  const flutD = fl.z.clamp(-1.5, 1.5).mul(flutA);
-  const flutP = fl.w.clamp(-1.5, 1.5).mul(flutA);
+  const flutA = s.mul(g.mul(0.7).add(0.3)).mul(eks).mul(flex).mul(0.07).mul(flutAtten);
+  const flutD = fl.z.clamp(-1.2, 1.2).mul(flutA);
+  const flutP = fl.w.clamp(-1.2, 1.2).mul(flutA);
 
   const along = lean.add(sway).add(branch).add(flutD);
   const across = swayX.add(flutP);
