@@ -418,18 +418,48 @@ cov 0.62), contact shadows (?ablate=contact to A/B), black facets root-caused to
      patches the builder prototype) or Metal FMA-fuses depths apart.
      bm4 GPU 49.6→39.4 ms (r.scene 16.4→6.4). bm7 neutral (hero-ring
      vertex ×2 offsets it). Opaque bark/rock twins REMOVED — wall loss.
-  - CURRENT STATE at user viewport (2592×1676): bm4 wall ~45 ms (fps
-    ~24), gpu ~39, cpu.submit ~15.7 @ 595 draws; bm7 wall ~41/gpu 42.
-  - **NEXT WHALE: CPU SUBMIT — ~15 ms for ~600 draws (~26 µs/draw,
-    three.js WebGPU per-object node/bind overhead). Plan: CDP CPU profile
-    of the frame loop (Playwright Profiler.start/stop over ~60 frames),
-    find the hot three.js paths, then targeted fixes (uniform-group
-    update batching, needsRefresh short-circuits, matrixWorldAutoUpdate
-    off for static veg, possibly upstream-style RenderObject caching).
-    BundleGroup REVERTED — three 0.184 static bundles recorded before
-    async pipeline compiles (empty forests), ignore renderOrder inside,
-    and cascade-camera bundles bypassed per-cascade caster layers (GPU
-    2×). Re-try only with a fixed three or a hand-rolled bundle path.**
+  5. SHADOW-PASS HASH STORM KILLED (ThreePatches.ts, d1aeb48): CDP
+     profile showed ~328 FULL material node-graph hashes/frame
+     (getMaterialCacheKey + cyrb53 + _getNodeChildren = top JS cost,
+     scaling with cascade renders). Root cause: Renderer mutates the
+     shared per-light shadow override material PER OBJECT and Material's
+     alphaTest accessor bumps `version` on every 0↔cutout crossing
+     (bark=0 / cards=0.32 alternate) → every shadow render object
+     sharing the material re-validates + re-hashes per frame. Fixes:
+     instance-own PLAIN alphaTest on shadow-pass materials (value stays
+     live for the per-draw uniform; version stops thrashing) + a
+     per-RenderObject getMaterialCacheKey memo keyed (material identity,
+     version, contextNode.version). NOTE: a material-keyed memo COLLIDES
+     builder states across geometries (getAttributes crash) — must be
+     per render object. Verified: hash functions absent from a 200-frame
+     profile; cpu.submit bm7 15.7→11.7 ms.
+  - **FINAL COOLED BASELINE this pass (user viewport 2592×1676, 24-sample
+    averages): bm1 wall 29.1 ms (~34 fps) · bm3 25.3 (~40) · bm4 42.8
+    (~23) · bm7 38.0 (~26); cpu.submit 11.4-14.2; cpu.update 0.4.
+    Session start (hot, bm4): 85.4 ms ≈ 12 fps. GPU-sums exceed wall
+    where passes overlap (TBDR).**
+  - NEXT (priority order, all quality-invariant):
+    1. POST-CHAIN CONSOLIDATION (~15 ms of full/half-res quad passes):
+       merge GTAO + bounce + clouds.half into ONE half-res MRT pass
+       (shared depth/position reconstruction); contact-shadow march
+       early-exit when occlusion saturates; audit TRAA resolve cost
+       (stock ~4.4 ms — consider a leaner custom resolve LAST, quality
+       risk). Bloom is stall-dominated, NOT a real whale (ablation: fps
+       flat) — skip.
+    2. Re-attribute bm1 (water SSR march/early-exit) and bm3 (impostor/
+       far-field) with the per-pass table at the user viewport.
+    3. CPU round 2 if it resurfaces: Bindings._update (~2.6 ms/frame,
+       per-bind-group uniform machinery) — uniform-group consolidation.
+    4. BundleGroup REVERTED — three 0.184 static bundles recorded before
+       async pipeline compiles (empty forests), ignore renderOrder
+       inside (prepass twins draw after color), and cascade-camera
+       bundles bypassed per-cascade caster layers (GPU 2×). Re-try only
+       with a fixed three or a hand-rolled bundle path.
+    5. The 120 fps directive at 2592×1676 native on M1 Max is ~8.3 ms
+       wall — after exhausting 1-4 plus format/bandwidth passes
+       (R11G11B10 post RTs, f16 math in post), present the data; the
+       user pre-authorized a 60 fps floor ONLY once every
+       quality-invariant path is exhausted.
   - Post-chain floor after scene fixes ≈ TRAA resolve 4.4 + megaquad
     (aerial/AO-apply/contact/bounce) 3.9 + GTAO 2.4 + clouds.half 2.5 +
     bloom-real ~1-2 + screen ~0.4 ≈ 15 ms at this viewport — the next
