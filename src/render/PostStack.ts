@@ -10,10 +10,9 @@
  *     toning, saturation, contrast) → AgX via renderer.toneMapping
  */
 
-import { AgXToneMapping, Matrix4, NoToneMapping, Vector3 } from 'three';
+import { AgXToneMapping, Matrix4, NoToneMapping, Vector2, Vector3 } from 'three';
 import type { Renderer, StorageBufferNode } from 'three/webgpu';
 import { RenderPipeline } from 'three/webgpu';
-import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import {
@@ -34,7 +33,6 @@ import {
   mrt,
   output,
   pass,
-  rtt,
   screenSize,
   screenUV,
   smoothstep,
@@ -53,6 +51,8 @@ import type { NF, NV2, NV3, NV4 } from '../gpu/TSLTypes';
 import type { Atmosphere } from '../sky/Atmosphere';
 import { CLOUD_BOTTOM, CLOUD_TOP, type Clouds } from '../sky/Clouds';
 import { GradeUniforms, gradeParamsAt } from './ColorScript';
+import { gtaoLayer } from './Gtao';
+import { HalfResMrtNode, type HalfResEntry } from './HalfResMrt';
 
 export class PostStack {
   readonly post: RenderPipeline;
@@ -141,10 +141,14 @@ export class PostStack {
     const depthTex = scenePass.getTextureNode('depth');
     const velocityTex = skyveldbg ? scenePass.getTextureNode('velocity') : null;
 
-    // --- half-res volumetric cloud layer (own quad pass) -----------------------
-    // The march is by far the most expensive screen-space work; running it at
-    // half res quarters the ray count. Jitter + TRAA absorb the upsample.
-    let cloudTex: NV4 | null = null;
+    // --- merged half-res MRT pass: clouds march + GTAO + SS bounce -------------
+    // These three layers ran as separate half-res passes (two RTTNodes + a
+    // GTAONode) — three rasters, three encoders, three RT round-trips over
+    // the same depth buffer. One MRT pass renders them together; consumers
+    // sample per-attachment texture nodes exactly as before. The cloud march
+    // is by far the most expensive screen-space work; half res quarters the
+    // ray count and jitter + TRAA absorb the upsample.
+    const halfEntries: HalfResEntry[] = [];
     if (clouds && !ablate.has('clouds')) {
       const cloudLayer = Fn((): NV4 => {
         const d = depthTex.x;
@@ -159,18 +163,76 @@ export class PostStack {
         const cl = clouds.march(camPosW, dirW, maxD, jitter);
         return vec4(cl.color, cl.alpha);
       })();
-      const cloudRtt = rtt(cloudLayer);
-      tagGpu((cloudRtt as unknown as { renderTarget: object }).renderTarget, 'clouds.half');
-      const sizeClouds = (): void => {
-        const dpr = renderer.getPixelRatio();
-        cloudRtt.setSize(
-          Math.max(2, Math.floor(window.innerWidth * dpr * 0.5)),
-          Math.max(2, Math.floor(window.innerHeight * dpr * 0.5)),
-        );
-      };
-      sizeClouds();
-      window.addEventListener('resize', sizeClouds);
-      cloudTex = cloudRtt as unknown as NV4;
+      halfEntries.push({ name: 'clouds', node: cloudLayer });
+    }
+    let halfAo: ReturnType<typeof uniform> | null = null;
+    if (!ablate.has('ao')) {
+      // resolution uniform is patched in below once the pass node exists
+      halfAo = uniform(new Vector2(2, 2));
+      halfEntries.push({
+        name: 'ao',
+        node: gtaoLayer(
+          depthTex as unknown as Parameters<typeof gtaoLayer>[0],
+          camera,
+          halfAo,
+          // GTAO defaults are mesh-viewer scale: 16 samples cost ~50 ms on
+          // terrain vistas (Phase-2 finding) — 8 samples, 1.6 m radius
+          { samples: 8, radius: 1.6, distanceFallOff: 0.6 },
+        ),
+      });
+    }
+    if (!ablate.has('bounce')) {
+      // screen-space bounce / color bleed (DEVIATIONS D-2): half-res gather
+      // of nearby on-screen radiance, depth-gated, composited after AO with
+      // the receiver's chroma. Subtle by design — probes carry large-scale
+      // bounce; this adds local green-on-trunk / warm-on-rock bleed.
+      const bounceLayer = Fn((): NV4 => {
+        const res = vec4(0).toVar();
+        const d = depthTex.x;
+        const isSky = d.lessThanEqual(1e-7).or(d.greaterThanEqual(0.9999999));
+        If(isSky.not(), () => {
+          const viewPos = getViewPosition(screenUV, d, uProjInv);
+          const dist = viewPos.length();
+          // ≈0.6 m world-space gather radius projected to screen
+          const rPx = clamp(float(0.55).div(dist), 0.004, 0.07);
+          const sum = vec3(0).toVar();
+          const wsum = float(0).toVar();
+          for (let i = 0; i < 8; i++) {
+            const ga = i * 2.399963 + 0.7;
+            const rr = Math.sqrt((i + 0.5) / 8);
+            const offX = Math.cos(ga) * rr;
+            const offY = Math.sin(ga) * rr;
+            const uvS = screenUV.add(vec2(offX, offY).mul(rPx));
+            const dS = texture(depthTex.value, uvS).x;
+            const pS = getViewPosition(uvS, dS, uProjInv);
+            const w = smoothstep(1.8, 0.25, pS.sub(viewPos).length());
+            sum.addAssign(texture(beauty.value, uvS).rgb.mul(w));
+            wsum.addAssign(w);
+          }
+          res.assign(vec4(sum.div(wsum.max(1e-3)), wsum.mul(0.125)));
+        });
+        return res;
+      })();
+      halfEntries.push({ name: 'bounce', node: bounceLayer });
+    }
+    let cloudTex: NV4 | null = null;
+    let aoTexNode: NV4 | null = null;
+    let bounceTex: NV4 | null = null;
+    if (halfEntries.length > 0) {
+      const halfPass = new HalfResMrtNode(halfEntries, 0.5);
+      if (halfAo) {
+        // the AO noise tiling must read the pass's true half-res dims
+        halfAo.value = halfPass.resolution.value;
+      }
+      if (clouds && !ablate.has('clouds')) {
+        cloudTex = halfPass.getTextureNode('clouds') as unknown as NV4;
+      }
+      if (!ablate.has('ao')) {
+        aoTexNode = halfPass.getTextureNode('ao') as unknown as NV4;
+      }
+      if (!ablate.has('bounce')) {
+        bounceTex = halfPass.getTextureNode('bounce') as unknown as NV4;
+      }
     }
 
     // --- aerial perspective from depth -----------------------------------------
@@ -270,61 +332,49 @@ export class PostStack {
       return scenePart;
     })();
 
-    // --- GTAO (full res: resolutionScale 0.5 produced row-streak artifacts) ------
-    // defaults are mesh-viewer scale: 16 samples cost ~50 ms on terrain vistas.
-    // Normals = null → derived from depth: material normals carry strong
-    // far-detail perturbation that disagrees with depth geometry — GTAO's
-    // cones bent into the surface and printed black facets on steep ridges.
-    const aoPass = ao(depthTex, null as unknown as typeof depthTex, camera);
-    const aoCfg = aoPass as unknown as {
-      samples: { value: number };
-      radius: { value: number };
-      distanceFallOff: { value: number };
-      resolutionScale: number;
-    };
-    aoCfg.samples.value = 8;
-    aoCfg.radius.value = 1.6;
-    aoCfg.distanceFallOff.value = 0.6;
-    // HALF-RES AO (was ~20 ms of a 48 ms frame at 1080p — the single
-    // hottest post pass). Plain bilinear at 0.5 printed row streaks on
-    // grazing terrain (Phase-2 note); the JOINT-BILATERAL upsample below
-    // (full-res depth as guide) is what makes half res viable.
-    aoCfg.resolutionScale = 0.5;
-    const aoTexNode = aoPass.getTextureNode();
-    // AO is a near-field cue — fade it out with distance (far AO from a
-    // 1.6 m radius is subpixel anyway and only adds instability)
-    const aoFaded = Fn((): NF => {
-      const viewC = getViewPosition(screenUV, depthTex.x, uProjInv);
-      const dist = viewC.length();
-      const k = smoothstep(700, 1800, dist);
-      // indirect-only approximation: sun-lit pixels (high HDR luminance)
-      // shed most of the post-AO — occlusion belongs to ambient light.
-      // (True aoNode-into-lighting wiring lands with the Phase-4 material
-      // restructure; see DEVIATIONS.md.)
-      const directK = smoothstep(1.2, 4.0, luminance(beauty.rgb)).mul(0.75);
-      // joint-bilateral 4-tap upsample: weight half-res AO taps by view-Z
-      // similarity against the full-res depth — edges stay crisp, flats
-      // stay smooth, no streaks
-      const halfTexel = vec2(1).div(screenSize.mul(0.5));
-      const zC = viewC.z;
-      const acc = float(0).toVar();
-      const wsum = float(1e-4).toVar();
-      for (const [ox, oy] of [
-        [-0.5, -0.5],
-        [0.5, -0.5],
-        [-0.5, 0.5],
-        [0.5, 0.5],
-      ] as const) {
-        const uvi = screenUV.add(halfTexel.mul(vec2(ox, oy)));
-        const ai = (aoTexNode.sample(uvi) as unknown as NV4).x;
-        const zi = getViewPosition(uvi, (depthTex.sample(uvi) as unknown as NV4).x, uProjInv).z;
-        const w = exp2(zi.sub(zC).abs().mul(-3.5));
-        acc.addAssign(ai.mul(w));
-        wsum.addAssign(w);
-      }
-      const aoRaw = acc.div(wsum);
-      return mix(mix(aoRaw, float(1), directK), float(1), k);
-    })();
+    // --- GTAO upsample (AO itself renders in the merged half-res pass) ----------
+    // Math lives in Gtao.ts (faithful GTAONode port; 8 samples / 1.6 m
+    // radius — defaults are mesh-viewer scale, 16 samples cost ~50 ms on
+    // terrain vistas. Normals derived from depth: material normals carry
+    // strong far-detail perturbation that disagrees with depth geometry —
+    // GTAO's cones bent into the surface and printed black facets.)
+    // HALF-RES AO (was ~20 ms of a 48 ms frame at 1080p): plain bilinear at
+    // 0.5 printed row streaks on grazing terrain; this JOINT-BILATERAL
+    // upsample (full-res depth as guide) is what makes half res viable.
+    // AO is a near-field cue — faded out with distance (far AO from a 1.6 m
+    // radius is subpixel anyway and only adds instability).
+    const aoSrc = aoTexNode;
+    const aoFaded = aoSrc
+      ? Fn((): NF => {
+          const viewC = getViewPosition(screenUV, depthTex.x, uProjInv);
+          const dist = viewC.length();
+          const k = smoothstep(700, 1800, dist);
+          // indirect-only approximation: sun-lit pixels (high HDR luminance)
+          // shed most of the post-AO — occlusion belongs to ambient light.
+          // (True aoNode-into-lighting wiring lands with the Phase-4 material
+          // restructure; see DEVIATIONS.md.)
+          const directK = smoothstep(1.2, 4.0, luminance(beauty.rgb)).mul(0.75);
+          const halfTexel = vec2(1).div(screenSize.mul(0.5));
+          const zC = viewC.z;
+          const acc = float(0).toVar();
+          const wsum = float(1e-4).toVar();
+          for (const [ox, oy] of [
+            [-0.5, -0.5],
+            [0.5, -0.5],
+            [-0.5, 0.5],
+            [0.5, 0.5],
+          ] as const) {
+            const uvi = screenUV.add(halfTexel.mul(vec2(ox, oy)));
+            const ai = ((aoSrc as unknown as { sample(uv: unknown): unknown }).sample(uvi) as NV4).x;
+            const zi = getViewPosition(uvi, (depthTex.sample(uvi) as unknown as NV4).x, uProjInv).z;
+            const w = exp2(zi.sub(zC).abs().mul(-3.5));
+            acc.addAssign(ai.mul(w));
+            wsum.addAssign(w);
+          }
+          const aoRaw = acc.div(wsum);
+          return mix(mix(aoRaw, float(1), directK), float(1), k);
+        })()
+      : null;
     // --- screen-space contact shadows (spec §2 floor) ---------------------------
     // Short depth-buffer march toward the sun: picks up the ~0.1–2 m contact
     // occlusion the 2048² cascades can't resolve. Near field only; floored so
@@ -377,60 +427,24 @@ export class PostStack {
       return result;
     })();
 
-    const withAO = ablate.has('ao')
-      ? aerialNode
-      : aerialNode.mul(aoFaded).mul(ablate.has('contact') ? float(1) : contactNode);
+    // aoFaded is null exactly when ablate.has('ao') (no merged-pass entry) —
+    // preserving the old ablate semantics: AO ablation also drops contact
+    const withAO =
+      aoFaded === null
+        ? aerialNode
+        : aerialNode.mul(aoFaded).mul(ablate.has('contact') ? float(1) : contactNode);
 
-    // --- screen-space bounce / color bleed (DEVIATIONS D-2) --------------------
-    // Half-res gather of nearby on-screen radiance, depth-gated, added back
-    // modulated by the receiver's chroma. Subtle by design: probes carry the
-    // large-scale bounce; this adds the local green-on-trunk / warm-on-rock
-    // bleed that probes are too coarse for. ?ablate=bounce to A/B.
+    // --- screen-space bounce composite (layer renders in the merged pass) ------
+    // Added back modulated by the receiver's chroma. Subtle by design: probes
+    // carry the large-scale bounce; this adds the local green-on-trunk /
+    // warm-on-rock bleed that probes are too coarse for. ?ablate=bounce.
     let withBounce = withAO;
-    if (!ablate.has('bounce')) {
-      const bounceLayer = Fn((): NV4 => {
-        const res = vec4(0).toVar();
-        const d = depthTex.x;
-        const isSky = d.lessThanEqual(1e-7).or(d.greaterThanEqual(0.9999999));
-        If(isSky.not(), () => {
-          const viewPos = getViewPosition(screenUV, d, uProjInv);
-          const dist = viewPos.length();
-          // ≈0.6 m world-space gather radius projected to screen
-          const rPx = clamp(float(0.55).div(dist), 0.004, 0.07);
-          const sum = vec3(0).toVar();
-          const wsum = float(0).toVar();
-          for (let i = 0; i < 8; i++) {
-            const ga = i * 2.399963 + 0.7;
-            const rr = Math.sqrt((i + 0.5) / 8);
-            const offX = Math.cos(ga) * rr;
-            const offY = Math.sin(ga) * rr;
-            const uvS = screenUV.add(vec2(offX, offY).mul(rPx));
-            const dS = texture(depthTex.value, uvS).x;
-            const pS = getViewPosition(uvS, dS, uProjInv);
-            const w = smoothstep(1.8, 0.25, pS.sub(viewPos).length());
-            sum.addAssign(texture(beauty.value, uvS).rgb.mul(w));
-            wsum.addAssign(w);
-          }
-          res.assign(vec4(sum.div(wsum.max(1e-3)), wsum.mul(0.125)));
-        });
-        return res;
-      })();
-      const bounceRtt = rtt(bounceLayer);
-      tagGpu((bounceRtt as unknown as { renderTarget: object }).renderTarget, 'bounce.half');
-      const sizeBounce = (): void => {
-        const dpr = renderer.getPixelRatio();
-        bounceRtt.setSize(
-          Math.max(2, Math.floor(window.innerWidth * dpr * 0.5)),
-          Math.max(2, Math.floor(window.innerHeight * dpr * 0.5)),
-        );
-      };
-      sizeBounce();
-      window.addEventListener('resize', sizeBounce);
+    if (bounceTex !== null) {
       // receiver albedo proxy: scene color normalized by its own luminance
       const recLum = luminance(withAO.rgb).add(0.25);
       const recTint = withAO.rgb.div(recLum);
       withBounce = withAO.rgb.add(
-        bounceRtt.rgb.mul(recTint).mul(bounceRtt.a).mul(0.16),
+        bounceTex.rgb.mul(recTint).mul(bounceTex.a).mul(0.16),
       ) as unknown as typeof withAO;
     }
 
