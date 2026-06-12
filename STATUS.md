@@ -438,7 +438,25 @@ cov 0.62), contact shadows (?ablate=contact to A/B), black facets root-caused to
     (~23) · bm7 38.0 (~26); cpu.submit 11.4-14.2; cpu.update 0.4.
     Session start (hot, bm4): 85.4 ms ≈ 12 fps. GPU-sums exceed wall
     where passes overlap (TBDR).**
-  - NEXT (priority order, all quality-invariant):
+  - **BUG (user-reported 2026-06-13, older issue, irritating): CLOUDS LAG
+    CAMERA MOTION** — clouds visibly shift/smear for a frame or several
+    after the camera moves/rotates, then settle back to the correct
+    position once still. Candidate mechanisms, in likelihood order:
+    (a) TRAA history reprojection of cloud/sky pixels — clouds are
+    composited in the aerial pass INSIDE the TRAA input, but sky pixels
+    (depth = far) carry zero/garbage velocity, so during rotation the
+    history blends clouds from the wrong screen position and "catches
+    up" over the accumulation window (classic no-velocity TAA ghosting);
+    (b) the half-res cloud RTT renders from explicit uCamPos/uProjInv/
+    uCamWorld uniforms copied in engine.onUpdate — verify they can't be
+    one frame stale relative to the pass that samples the RTT (and that
+    the copied projection isn't carrying the PREVIOUS frame's TRAA
+    jitter offset — TRAA re-applies setViewOffset during render, after
+    our copy); (c) the depth-aware half-res upsample gate. DIAGNOSIS
+    FIRST STEP: A/B with ?ablate=taa while orbiting — if the lag
+    vanishes, it's (a) and the fix is proper sky-velocity (camera
+    rotation-derived velocity for far-depth pixels feeding TRAA), not
+    clamping hacks. Repro: any bookmark, swing the camera.
     1. POST-CHAIN CONSOLIDATION (~15 ms of full/half-res quad passes):
        merge GTAO + bounce + clouds.half into ONE half-res MRT pass
        (shared depth/position reconstruction); contact-shadow march
