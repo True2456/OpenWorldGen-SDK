@@ -35,7 +35,7 @@ import {
   vec4,
 } from 'three/tsl';
 import type { NB, NF, NU, NV3, NV4 } from '../gpu/TSLTypes';
-import { vegWindOffset, windContext } from './Wind';
+import { vegWindOffset, windContext, type WindBind } from './Wind';
 
 /**
  * Main-camera position for LOD-ring fades. NEVER use TSL `cameraPosition`
@@ -72,11 +72,11 @@ export interface InstanceBinding {
   /** per-instance tint strength (0 disables) */
   tint?: number;
   /**
-   * wind response scale (0/undefined = rigid: rocks, deadfall, shadow
-   * proxies). Uses the baked vdata flex/phase, so only living vegetation
-   * should opt in.
+   * wind response (undefined = rigid: rocks, deadfall, shadow proxies).
+   * Uses the baked vdata flex/phase, so only living vegetation should
+   * opt in.
    */
-  wind?: number;
+  wind?: WindBind;
 }
 
 /** cheap pcg-ish hash of the instance slot → 0..1 (pure expression) */
@@ -196,12 +196,19 @@ export function instanceVeg(
   const pz = rz.add(B.z.mul(ls.y));
   const dist = A.xyz.sub(vegViewPos as unknown as NV3).length();
   let wpos = vec3(px, ls.y, pz).add(A.xyz);
-  // hierarchical wind (Phase 6): gust-driven sway + branch flutter via the
-  // baked vdata flex/phase. Same node feeds castShadowPositionNode below —
-  // shadows sway with their trees.
+  // hierarchical wind (Phase 6): lean + natural-frequency sway + lagged
+  // branch motion + aperiodic flutter via the baked vdata flex/phase. Same
+  // node feeds castShadowPositionNode below — shadows sway with their trees.
   if (bind.wind && windContext()) {
     wpos = wpos.add(
-      vegWindOffset(A.xyz, slotHash(slot, 211), dist, bind.wind),
+      vegWindOffset({
+        origin: A.xyz,
+        localY: ls.y,
+        scale: A.w,
+        instPhase: slotHash(slot, 211),
+        dist,
+        bind: bind.wind,
+      }),
     ) as typeof wpos;
   }
   // Normals MUST rotate with the instance (same mechanism as three's

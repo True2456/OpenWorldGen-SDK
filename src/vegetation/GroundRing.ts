@@ -687,10 +687,16 @@ export class GroundRing {
     if (windContext()) {
       const wd = vec2(windU.dir as unknown as NV2);
       const tN = positionLocal.y; // 0..1 along the blade
-      const amp = (windU.strength as unknown as NF)
+      const st = windU.strength as unknown as NF;
+      const amp = st
         .mul(gustAt(wpos).mul(0.9).add(0.3))
         .mul(windExposure(wpos));
-      const bend = amp.mul(tN.mul(tN)).mul(bladeH.mul(0.42));
+      // lean² rule (matches the tree rework): strong wind flattens the
+      // sward — deflection grows superlinearly, the tempo doesn't change
+      const bend = amp
+        .mul(st.mul(0.55).add(0.6))
+        .mul(tN.mul(tN))
+        .mul(bladeH.mul(0.42));
       const flut = time
         .mul(5.2)
         .add(h2.x.mul(6.2832))
