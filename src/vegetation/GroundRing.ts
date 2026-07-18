@@ -69,13 +69,15 @@ import {
   vec3,
 } from 'three/tsl';
 import { canopyAt, cellHash, cellHash2 } from '../gpu/passes/Scatter';
+import { BIOME_TEX_SCALE } from '../contracts/biome';
+import { getProfile } from '../world/profiles/registry';
 import { grassTranslucency, rockMaterial } from '../render/VegMaterials';
 import { depthPrepassTwin } from '../render/VegPrepass';
 import { gustAt, windContext, windExposure, windU } from '../render/Wind';
+import { climateColdK, climateContext } from '../atmosphere/ClimateClock';
 import type { NB, NF, NI, NU, NV2, NV3, NV4 } from '../gpu/TSLTypes';
 import type { Heightfield } from '../world/Heightfield';
 import type { ProbeGI } from '../gpu/passes/ProbeGI';
-import { WORLD_SIZE } from '../world/WorldConst';
 import {
   barkChipGeometry,
   debrisMaterial,
@@ -86,6 +88,11 @@ import {
 import { buildRock } from './RockBuilder';
 import type { WorldSeed } from '../core/Seed';
 import { runiform } from '../gpu/RenderUniform';
+
+/** per-biome grass density (ids 0..9) — desert (6) is zero */
+const GRASS_BY_BIOME = [0.18, 0.7, 0.62, 0.7, 1.5, 1.1, 0, 0.92, 0.18, 1.75] as const;
+/** per-biome debris density — desert gets more pebbles/cobbles, swamp more litter */
+const DEBRIS_BY_BIOME = [0.4, 0.6, 1.0, 1.0, 0.6, 0.75, 1.45, 0.95, 1.1, 0.65] as const;
 
 const GRASS_GRID = 3072;
 const GRASS_CELL = 0.105; // m → ±161 m ring, ~90 slots/m²
@@ -310,7 +317,17 @@ export class GroundRing {
     private canopyTex: StorageTexture,
     private seed: WorldSeed,
     private gi: ProbeGI | null = null,
+    private profileId?: string,
   ) {}
+
+  /**
+   * Rebind heightfield/canopy when stream residency recenters so grass
+   * samples the chunk under the camera instead of the boot tile.
+   */
+  rebind(hf: Heightfield, canopyTex: StorageTexture): void {
+    this.hf = hf;
+    this.canopyTex = canopyTex;
+  }
 
   /**
    * Probe ambient for the carpets (same field as terrain/veg — without it
@@ -326,7 +343,10 @@ export class GroundRing {
       vec3(0, 1, 0) as unknown as NV3,
     );
     irr = irr.mul(
-      canopyAt(this.canopyTex, (positionWorld as unknown as NV3).xz)
+      canopyAt(this.canopyTex, (positionWorld as unknown as NV3).xz, {
+        x: this.hf.worldOffsetX,
+        z: this.hf.worldOffsetZ,
+      })
         .mul(0.12)
         .oneMinus(),
     ) as typeof irr;
@@ -341,6 +361,7 @@ export class GroundRing {
     this.group.add(this.prepassGroup);
     const hf = this.hf;
     const salt = this.seed.sub('groundring') & 0x7fffffff;
+    const grassScaleU = uniform(getProfile(this.profileId).climate.groundGrassScale);
     const camU = this.camU;
     const planesU = this.planesU;
     const canopyTex = this.canopyTex;
@@ -383,10 +404,10 @@ export class GroundRing {
       return vec2(wx, wy);
     };
 
-    const byBio = (b: NI, vals: number[]): NF => {
-      let e: NF = float(vals[5] ?? 0);
-      for (let i = 4; i >= 0; i--) {
-        e = b.equal(float(i).toInt()).select(float(vals[i] ?? 0), e) as NF;
+    const byBio = (b: NI, vals: readonly number[]): NF => {
+      let e: NF = float(vals[vals.length - 1] ?? 0);
+      for (let i = vals.length - 2; i >= 0; i--) {
+        e = b.equal(int(i)).select(float(vals[i] ?? 0), e) as NF;
       }
       return e;
     };
@@ -429,7 +450,7 @@ export class GroundRing {
       If(dist.greaterThan(GRASS_R), () => {
         Return();
       });
-      const uvW = wpos.div(WORLD_SIZE).add(0.5);
+      const uvW = hf.uvFromWorld(wpos);
       const bio = texture(
         hf.biomeTex as NonNullable<typeof hf.biomeTex>,
         uvW,
@@ -441,7 +462,7 @@ export class GroundRing {
         0,
       ) as unknown as NV4;
       const ns = texture(hf.normalTex, uvW, 0) as unknown as NV4;
-      const bioId = bio.x.mul(8).add(0.5).floor().toInt();
+      const bioId = bio.x.mul(BIOME_TEX_SCALE).add(0.5).floor().toInt();
       const h = hf.sampleHeight(wpos);
       // gate on the ACTUAL water surface, not the carve apron: riverDepth
       // is widen-blurred and flags whole gorge floors as "river" — grass
@@ -450,7 +471,7 @@ export class GroundRing {
       If(above.lessThan(0.04), () => {
         Return();
       });
-      const canopy = canopyAt(canopyTex, wpos);
+      const canopy = canopyAt(canopyTex, wpos, { x: hf.worldOffsetX, z: hf.worldOffsetZ });
       // soft bank margin: full grass from ~0.5 m above the waterline. The
       // channel scar (deep riverDepth) thins hard — the debris ring's
       // cobbles take over there (scene1: cobbled floor with grassy banks,
@@ -459,17 +480,20 @@ export class GroundRing {
       const bank = smoothstep(0.06, 0.5, above).mul(
         float(1).sub(smoothstep(0.2, 1.1, fl.z).mul(0.78)),
       );
-      let dens = byBio(bioId, [0.18, 0.7, 0.62, 0.7, 1.5, 1.1])
+      let dens = byBio(bioId, GRASS_BY_BIOME)
         .mul(bank)
         .mul(bio.z.mul(0.85).add(0.15))
         .mul(float(1).sub(bio.w.mul(0.55)))
         .mul(float(1).sub(canopy.mul(0.45)))
-        .mul(fl.x.mul(0.35).add(0.75));
-      // near-field scruff floor: NOTHING within ~12 m may be totally bald
-      // (Pillar A) — thin dry blades survive even on poor soil. Hard gates
-      // (water, snow, steep rock) still apply below.
+        .mul(fl.x.mul(0.35).add(0.75))
+        .mul(grassScaleU as unknown as NF);
+      // near-field scruff floor: thin dry blades on poor soil — disabled when
+      // profile sets groundGrassScale to 0 (desert must stay bare)
       dens = dens.max(
-        float(0.3).mul(float(1).sub(smoothstep(8, 14, dist))).mul(bank),
+        float(0.3)
+          .mul(float(1).sub(smoothstep(8, 14, dist)))
+          .mul(bank)
+          .mul(grassScaleU as unknown as NF),
       );
       dens = dens
         .mul(float(1).sub(bio.y.mul(0.95)))
@@ -522,7 +546,7 @@ export class GroundRing {
       If(dist.greaterThan(DEB_R), () => {
         Return();
       });
-      const uvW = wpos.div(WORLD_SIZE).add(0.5);
+      const uvW = hf.uvFromWorld(wpos);
       const bio = texture(
         hf.biomeTex as NonNullable<typeof hf.biomeTex>,
         uvW,
@@ -534,7 +558,7 @@ export class GroundRing {
         0,
       ) as unknown as NV4;
       const ns = texture(hf.normalTex, uvW, 0) as unknown as NV4;
-      const bioId = bio.x.mul(8).add(0.5).floor().toInt();
+      const bioId = bio.x.mul(BIOME_TEX_SCALE).add(0.5).floor().toInt();
       const h = hf.sampleHeight(wpos);
       // cobbles stay visible THROUGH shallow water (scene1: the trickle
       // runs over them) — only drop debris under genuinely deep water
@@ -542,7 +566,7 @@ export class GroundRing {
       If(submergedBy.greaterThan(0.55), () => {
         Return();
       });
-      const canopy = canopyAt(canopyTex, wpos);
+      const canopy = canopyAt(canopyTex, wpos, { x: hf.worldOffsetX, z: hf.worldOffsetZ });
       const streamK = smoothstep(0.32, 0.7, fl.y).max(smoothstep(0.02, 0.2, fl.z));
       // bank margin: too shallow for the bed override, too wet for grass —
       // gravel it or it reads as a bare strip along every wash
@@ -564,7 +588,7 @@ export class GroundRing {
       const wLitter = canopy.mul(3.0).add(0.08).mul(float(1).sub(streamK.mul(0.8))).mul(dry);
       const wSum = wCobble.add(wPebble).add(wTwig).add(wChip).add(wLitter);
       // streambeds are FULLY cobbled geometry (spec §9) — override biome density
-      const dens = byBio(bioId, [0.4, 0.6, 1.0, 1.0, 0.6, 0.75])
+      const dens = byBio(bioId, DEBRIS_BY_BIOME)
         .mul(float(1).sub(bio.y.mul(0.9)))
         .mul(wSum.mul(0.5).min(1))
         .max(streamK.mul(0.95))
@@ -614,7 +638,7 @@ export class GroundRing {
       If(dist.lessThan(FAR_R0 - 16).or(dist.greaterThan(FAR_R)), () => {
         Return();
       });
-      const uvW = wpos.div(WORLD_SIZE).add(0.5);
+      const uvW = hf.uvFromWorld(wpos);
       const bio = texture(
         hf.biomeTex as NonNullable<typeof hf.biomeTex>,
         uvW,
@@ -626,23 +650,24 @@ export class GroundRing {
         0,
       ) as unknown as NV4;
       const ns = texture(hf.normalTex, uvW, 0) as unknown as NV4;
-      const bioId = bio.x.mul(8).add(0.5).floor().toInt();
+      const bioId = bio.x.mul(BIOME_TEX_SCALE).add(0.5).floor().toInt();
       const h = hf.sampleHeight(wpos);
       const above = h.sub(hf.sampleWaterYNearest(wpos));
       If(above.lessThan(0.06), () => {
         Return();
       });
-      const canopy = canopyAt(canopyTex, wpos);
+      const canopy = canopyAt(canopyTex, wpos, { x: hf.worldOffsetX, z: hf.worldOffsetZ });
       const bank = smoothstep(0.06, 0.5, above).mul(
         float(1).sub(smoothstep(0.2, 1.1, fl.z).mul(0.78)),
       );
-      const dens = byBio(bioId, [0.18, 0.7, 0.62, 0.7, 1.5, 1.1])
+      const dens = byBio(bioId, GRASS_BY_BIOME)
         .mul(bank)
         .mul(bio.z.mul(0.85).add(0.15))
         .mul(float(1).sub(bio.w.mul(0.55)))
         .mul(float(1).sub(canopy.mul(0.45)))
         .mul(float(1).sub(bio.y.mul(0.95)))
-        .mul(float(1).sub(smoothstep(0.55, 0.95, ns.w)));
+        .mul(float(1).sub(smoothstep(0.55, 0.95, ns.w)))
+        .mul(grassScaleU as unknown as NF);
       // ramp IN over the fine band's dissolve, OUT at the splat handoff
       const fadeIn = smoothstep(FAR_R0 - 16, FAR_R0 + 14, dist);
       const edge = float(1).sub(smoothstep(FAR_R * 0.93, FAR_R, dist));
@@ -859,7 +884,7 @@ export class GroundRing {
     const tNrm = (
       texture(
         this.hf.normalTex,
-        wpos.div(WORLD_SIZE).add(0.5),
+        this.hf.uvFromWorld(wpos),
         0,
       ) as unknown as NV4
     ).xyz.normalize();
@@ -893,10 +918,11 @@ export class GroundRing {
     // shade-grown grass: under crowns the sward stays deep cool green (dry
     // straw patches are a full-sun phenomenon) — without this the carpet
     // reads as a pale glowing mat inside forest interiors
-    const cov = canopyAt(this.canopyTex, wpos);
-    const dryK = smoothstep(0.7, 0.95, patch.x).mul(
-      float(1).sub(cov.mul(0.85)),
-    );
+    const cov = canopyAt(this.canopyTex, wpos, { x: this.hf.worldOffsetX, z: this.hf.worldOffsetZ });
+    let dryK = smoothstep(0.7, 0.95, patch.x).mul(float(1).sub(cov.mul(0.85)));
+    if (climateContext()) {
+      dryK = dryK.add(climateColdK().mul(0.28).mul(float(1).sub(cov.mul(0.7))));
+    }
     let albedo = mix(fresh, dry, dryK) as unknown as NV3;
     albedo = albedo.mul(patch.y.sub(0.5).mul(0.3).add(1)) as unknown as NV3;
     albedo = mix(albedo, vec3(0.018, 0.052, 0.014), cov.mul(0.55)) as unknown as NV3;

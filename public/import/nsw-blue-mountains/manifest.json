@@ -1,0 +1,42 @@
+{
+  "id": "nsw-blue-mountains",
+  "label": "NSW: Blue Mountains (Katoomba)",
+  "bounds": {
+    "west": 150.25,
+    "east": 150.31,
+    "south": -33.78,
+    "north": -33.72
+  },
+  "worldSize": 4096,
+  "res": 512,
+  "demWeight": 0.92,
+  "baseProfile": "oceania",
+  "maps": {
+    "height": "/import/nsw-blue-mountains/height.bin",
+    "moisture": "/import/nsw-blue-mountains/moisture.bin",
+    "biomePrior": "/import/nsw-blue-mountains/biomePrior.bin"
+  },
+  "geo": {
+    "stateId": "nsw",
+    "tileId": "nsw-c11-r04",
+    "regionId": "oceania",
+    "center": {
+      "lat": -33.75,
+      "lon": 150.28
+    }
+  },
+  "camera": {
+    "x": 0,
+    "z": 0,
+    "alt": 120,
+    "yaw": 0.4,
+    "pitch": -0.35,
+    "tod": 16
+  },
+  "stats": {
+    "elevMin": 285,
+    "elevMax": 1081,
+    "sourceDem": "reference/import/nsw-blue-mountains-dem.bin",
+    "sourceOrtho": "reference/import/nsw-blue-mountains-ortho.png"
+  }
+}

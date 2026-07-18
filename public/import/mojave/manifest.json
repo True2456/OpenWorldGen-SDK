@@ -1,0 +1,33 @@
+{
+  "id": "mojave",
+  "label": "Import: mojave",
+  "bounds": {
+    "west": -116.52,
+    "east": -116.48,
+    "south": 36.48,
+    "north": 36.52
+  },
+  "worldSize": 4096,
+  "res": 512,
+  "demWeight": 0.92,
+  "baseProfile": "desert",
+  "maps": {
+    "height": "/import/mojave/height.bin",
+    "moisture": "/import/mojave/moisture.bin",
+    "biomePrior": "/import/mojave/biomePrior.bin"
+  },
+  "camera": {
+    "x": 0,
+    "z": 0,
+    "alt": 120,
+    "yaw": 0.4,
+    "pitch": -0.35,
+    "tod": 16
+  },
+  "stats": {
+    "elevMin": 691.7842407226562,
+    "elevMax": 713.4344482421875,
+    "sourceDem": "reference/import/mojave-dem.tif",
+    "sourceOrtho": "reference/import/mojave-ortho.png"
+  }
+}

@@ -78,6 +78,8 @@ export class Clouds {
   private timeAcc = 0;
   private lastBakeT = -1e9;
   private readonly DRIFT_V = 22; // m/s at the cloud layer
+  private readonly baseCoverage: number;
+  private readonly baseDensity: number;
 
   constructor(atmosphere: Atmosphere) {
     this.atmosphere = atmosphere;
@@ -87,6 +89,8 @@ export class Clouds {
     const densQ = Number(q.get('cdens') ?? NaN);
     if (Number.isFinite(covQ)) this.coverage.value = covQ;
     if (Number.isFinite(densQ)) this.density.value = densQ;
+    this.baseCoverage = this.coverage.value;
+    this.baseDensity = this.density.value;
     this.flatDebug = q.get('cloudflat') === '1';
     this.baseNoise = new Storage3DTexture(BASE_RES, BASE_RES, BASE_RES);
     this.baseNoise.type = HalfFloatType;
@@ -103,8 +107,10 @@ export class Clouds {
   }
 
   async init(renderer: Renderer): Promise<void> {
-    // --- base: perlin-worley remap (tileable enough via domain fract) --------
+    const lite = new URLSearchParams(window.location.search).get('lite') === '1';
+    if (lite) return;
     const N = BASE_RES;
+    // --- base: perlin-worley remap (tileable enough via domain fract) --------
     const baseK = Fn(() => {
       const i = instanceIndex;
       If(i.greaterThanEqual(N * N * N), () => {
@@ -196,6 +202,13 @@ export class Clouds {
     shadowK.setName('cloudShadowMap');
     this.shadowKernel = shadowK;
     await renderer.computeAsync(shadowK);
+  }
+
+  /** Weather preset multiplier from ?weather= */
+  setWeatherScale(scale: number): void {
+    const s = Math.max(0.2, scale);
+    this.coverage.value = Math.min(1, this.baseCoverage * s);
+    this.density.value = this.baseDensity * s;
   }
 
   /** re-bake the shadow map (call after sun changes) */

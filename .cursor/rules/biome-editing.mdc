@@ -1,0 +1,12 @@
+---
+description: Rules for editing biomes and world profiles
+globs: src/world/profiles/**,src/gpu/passes/BiomeSnow.ts,src/contracts/biome.ts
+---
+
+# Biome editing
+
+- Read `docs/agents/BIOMES.md` before editing.
+- One profile = one file under `src/world/profiles/`.
+- Scatter `byBiome()` arrays must have **10** entries (Biome.COUNT).
+- `biomeTex.r` stores `biomeId / 16` (see `BIOME_TEX_SCALE`).
+- After visual changes: `npm run shoot -- --profile <name> --preset low --seed 1 --out shots/<name>.png`

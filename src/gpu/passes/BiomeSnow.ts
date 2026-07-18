@@ -2,44 +2,51 @@
  * Biome + snow classification at full height resolution.
  * temperature(altitude, aspect) × moisture × slope × exposure → biome id,
  * snow coverage, vegetation density, rock exposure. Written as rgba8:
- *   r = biomeId / 8, g = snow 0..1, b = vegetation density, a = rock exposure
- *
- * Snow rules (Pillar/floors): altitude+temperature driven, fades on steep
- * slopes, bonus on sheltered north faces and on low-slope ledges (curvature),
- * dithered at the EDGE in the material (classification stores the smooth field).
+ *   r = biomeId / 16, g = snow 0..1, b = vegetation density, a = rock exposure
  */
 
 import { NearestFilter } from 'three';
 import type { Renderer } from 'three/webgpu';
-import { StorageTexture } from 'three/webgpu';
+import { StorageBufferAttribute, StorageTexture } from 'three/webgpu';
 import {
   Fn,
   If,
   Return,
   clamp,
   float,
+  floor,
   instanceIndex,
   mix,
   mx_noise_float,
   smoothstep,
+  storage,
   texture,
   textureStore,
   uvec2,
   vec2,
   vec4,
 } from 'three/tsl';
+import { BIOME_TEX_SCALE, type ClimateParams } from '../../contracts/biome';
 import { zoneMasks, type MacroParams } from '../../world/MacroMap';
 import { Biome, LAKE_LEVEL, TREELINE, WORLD_SIZE } from '../../world/WorldConst';
+import { getProfile } from '../../world/profiles/registry';
 import type { FloatBuffer } from './HeightSynthesis';
 
 export interface BiomeSnowOpts {
   res: number;
   mp: MacroParams;
+  profileId?: string;
+  /** orthophoto-derived moisture prior (CPU, res×res) */
+  importMoisture?: Float32Array;
+  importMoistureRes?: number;
   /** rgba16f normal+slope texture (filtered) */
   normalTex: StorageTexture;
   /** rgba16f fields texture: moisture, flowStrength, riverDepth, W */
   fieldsTex: StorageTexture;
 }
+
+/** @deprecated use BiomeSnowOpts */
+export type BiomeClassifierOpts = BiomeSnowOpts;
 
 export async function runBiomeSnow(
   renderer: Renderer,
@@ -47,6 +54,17 @@ export async function runBiomeSnow(
   opts: BiomeSnowOpts,
 ): Promise<StorageTexture> {
   const { res, mp } = opts;
+  const climate: ClimateParams = getProfile(opts.profileId).climate;
+  const impMoist = opts.importMoisture;
+  const impMoistRes = opts.importMoistureRes ?? 0;
+  const impBlend =
+    impMoist && impMoistRes > 0 ? (opts.profileId === 'desert' ? 0.5 : 0.65) : 0;
+  const impRes = Math.max(impMoistRes, 1);
+  const impBuf = storage(
+    new StorageBufferAttribute(impMoist && impMoistRes > 0 ? impMoist : new Float32Array([0.5]), 1),
+    'float',
+    impMoist?.length ?? 1,
+  );
   const out = new StorageTexture(res, res);
   out.magFilter = NearestFilter;
   out.minFilter = NearestFilter;
@@ -66,20 +84,45 @@ export async function runBiomeSnow(
     const n = ns.xyz;
     const slope = ns.w;
     const fields = texture(opts.fieldsTex, uv);
-    const moisture = fields.x;
+    const moistureRaw = fields.x;
+    const fx = uv.x.mul(float(impRes)).sub(0.5);
+    const fy = uv.y.mul(float(impRes)).sub(0.5);
+    const x0 = clamp(floor(fx), 0, impRes - 1);
+    const y0 = clamp(floor(fy), 0, impRes - 1);
+    const x1 = clamp(x0.add(1), 0, impRes - 1);
+    const y1 = clamp(y0.add(1), 0, impRes - 1);
+    const tx = fx.sub(x0);
+    const ty = fy.sub(y0);
+    const i00 = y0.mul(impRes).add(x0);
+    const i10 = y0.mul(impRes).add(x1);
+    const i01 = y1.mul(impRes).add(x0);
+    const i11 = y1.mul(impRes).add(x1);
+    const impM = impBuf
+      .element(i00)
+      .mul(float(1).sub(tx).mul(float(1).sub(ty)))
+      .add(impBuf.element(i10).mul(tx.mul(float(1).sub(ty))))
+      .add(impBuf.element(i01).mul(float(1).sub(tx).mul(ty)))
+      .add(impBuf.element(i11).mul(tx.mul(ty)));
+    const moisture = clamp(
+      mix(
+        moistureRaw.mul(climate.moistureScale).add(climate.moistureOffset),
+        impM,
+        float(impBlend),
+      ),
+      0,
+      1,
+    );
     const water = fields.z;
     const zm = zoneMasks(wpos, mp);
 
     // temperature: lapse with altitude; north faces colder; noise breakup.
-    // "north" is −z; aspect cooling scales with slope.
     const northness = n.z.negate().mul(clamp(slope, 0, 1)).clamp(0, 1);
     const tNoise = mx_noise_float(wpos.div(420).add(vec2(mp.off.hard[0], mp.off.hard[1])));
-    // calibrated (measured via ?view=bioR): onset ≈ 750 m, full ≈ ~1150 m —
-    // deep snow zone covers the upper half of the massif like the reference
-    const temp = float(11.8)
+    const temp = float(11.8 + climate.tempOffset)
       .sub(h.mul(0.0125))
       .sub(northness.mul(2.0))
       .add(tNoise.mul(1.2));
+    const snowline = float(TREELINE + climate.snowlineOffset);
 
     // local curvature from height buffer (ledge detection for snow/scree)
     const texel = WORLD_SIZE / res;
@@ -130,13 +173,18 @@ export async function runBiomeSnow(
     );
 
     // --- biome decision tree -----------------------------------------------------
-    const isAlpine = h.greaterThan(float(TREELINE).add(tNoise.mul(60)));
-    const isSubalpine = h.greaterThan(float(TREELINE - 170).add(tNoise.mul(70)));
+    const isAlpine = h.greaterThan(snowline.add(tNoise.mul(60)));
+    const isSubalpine = h.greaterThan(snowline.sub(170).add(tNoise.mul(70)));
     const lowFlat = slope.lessThan(0.35);
     const isWetland = moisture
       .greaterThan(0.72)
       .and(lowFlat)
       .and(h.lessThan(LAKE_LEVEL + 70));
+    const isSwamp = moisture
+      .greaterThan(0.78)
+      .and(lowFlat)
+      .and(h.lessThan(LAKE_LEVEL + 130))
+      .and(zm.tLake.greaterThan(0.15));
     const meadowNoise = mx_noise_float(wpos.div(560).add(vec2(mp.off.hills[0], mp.off.hills[1])));
     const isMeadow = meadowNoise
       .greaterThan(0.22)
@@ -144,6 +192,25 @@ export async function runBiomeSnow(
       .and(moisture.lessThan(0.72))
       .and(h.lessThan(520))
       .and(zm.tKarst.lessThan(0.4));
+    const isGrassland = meadowNoise
+      .greaterThan(-0.05)
+      .and(slope.lessThan(0.48))
+      .and(moisture.lessThan(0.55))
+      .and(moisture.greaterThan(0.18))
+      .and(h.lessThan(680))
+      .and(zm.tAlp.lessThan(0.35));
+    const isDesert = moisture
+      .lessThan(0.32)
+      .and(temp.greaterThan(6))
+      .and(slope.lessThan(0.62))
+      .and(h.lessThan(920))
+      .and(snow.lessThan(0.08));
+    const isJungle = moisture
+      .greaterThan(0.62)
+      .and(temp.greaterThan(4))
+      .and(h.lessThan(720))
+      .and(slope.lessThan(0.68))
+      .and(snow.lessThan(0.05));
     const isKarst = zm.tKarst.greaterThan(0.42);
 
     const biome = isAlpine
@@ -151,11 +218,23 @@ export async function runBiomeSnow(
         float(Biome.Alpine),
         isSubalpine.select(
           float(Biome.Subalpine),
-          isWetland.select(
-            float(Biome.Wetland),
-            isKarst.select(
-              float(Biome.KarstForest),
-              isMeadow.select(float(Biome.Meadow), float(Biome.Conifer)),
+          isSwamp.select(
+            float(Biome.Swamp),
+            isWetland.select(
+              float(Biome.Wetland),
+              isDesert.select(
+                float(Biome.Desert),
+                isJungle.select(
+                  float(Biome.Jungle),
+                  isKarst.select(
+                    float(Biome.KarstForest),
+                    isGrassland.select(
+                      float(Biome.Grassland),
+                      isMeadow.select(float(Biome.Meadow), float(Biome.Conifer)),
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         ),
@@ -167,7 +246,7 @@ export async function runBiomeSnow(
       .mul(smoothstep(-2.5, 1.5, temp))
       .mul(smoothstep(0.05, 0.25, moisture.add(0.15)))
       .mul(smoothstep(1.9, 1.1, slope));
-    const dens = clamp(densBase.sub(snow.mul(0.7)), 0, 1);
+    const dens = clamp(densBase.sub(snow.mul(0.7)).mul(climate.vegDensityScale), 0, 1);
 
     const DIAG_COMPONENTS = false; // temp bisect: write snow components
     textureStore(
@@ -175,7 +254,7 @@ export async function runBiomeSnow(
       uvec2(x.toUint(), y.toUint()),
       DIAG_COMPONENTS
         ? vec4(snowTemp, slopeHold, ledge, temp.div(20).add(0.5))
-        : vec4(biome.div(8), snow, dens, rockExposure),
+        : vec4(biome.div(BIOME_TEX_SCALE), snow, dens, rockExposure),
     ).toWriteOnly();
   })().compute(res * res);
   kernel.setName('biomeSnowClassify');

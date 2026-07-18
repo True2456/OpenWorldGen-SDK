@@ -27,22 +27,26 @@ import {
   vec2,
   vec3,
   vec4,
+  smoothstep,
 } from 'three/tsl';
 import type { LaasParams } from '../core/Params';
 import type { WorldSeed } from '../core/Seed';
 import { bilerpFloatBuffer, uvToGrid } from '../gpu/BufferSample';
 import { bakeNoiseTextures } from '../gpu/passes/NoiseBake';
-import type { NF, NI, NV2, NV3 } from '../gpu/TSLTypes';
+import type { NF, NI, NV2, NV3, NV4 } from '../gpu/TSLTypes';
 import { runBiomeSnow } from '../gpu/passes/BiomeSnow';
 import { runErosion } from '../gpu/passes/Erosion';
 import { runFlowRivers, type FlowResult } from '../gpu/passes/FlowRivers';
-import {
-  runHeightSynthesis,
-  type FloatBuffer,
-  type SynthesisResult,
-} from '../gpu/passes/HeightSynthesis';
+import { runHeightSynthesis } from '../gpu/passes/HeightSynthesis';
+import type { FloatBuffer, SynthesisResult } from '../gpu/passes/HeightSynthesis';
+import type { ImportManifest } from '../contracts/import';
+import { loadImportMaps } from './import/loadImport';
+import { enrichImportManifest, resolveWorldBoot } from './WorldModel';
 import { makeMacroParams, type MacroParams } from './MacroMap';
 import { WORLD_SIZE, qualityConfig, type QualityConfig } from './WorldConst';
+import { chunkCenter } from './stream/ChunkCoords';
+
+export type { FloatBuffer, SynthesisResult } from '../gpu/passes/HeightSynthesis';
 
 export type ProgressFn = (p: number, msg: string) => void;
 
@@ -50,6 +54,9 @@ export class Heightfield {
   readonly cfg: QualityConfig;
   readonly mp: MacroParams;
   readonly res: number;
+  /** world-center offset when this field covers a streamed chunk */
+  readonly worldOffsetX: number;
+  readonly worldOffsetZ: number;
 
   /** final height (m), res×res storage buffer — single source of truth */
   readonly height: SynthesisResult['height'];
@@ -74,8 +81,16 @@ export class Heightfield {
   waterFarRes = 0;
   /** rgba16f at sim res: moisture, flowStrength, riverDepth, waterSurface W */
   fieldsTex: StorageTexture | null = null;
-  /** rgba8 at full res: biomeId/8, snow, vegDensity, rockExposure */
+  /** rgba8 at full res: biomeId/16, snow, vegDensity, rockExposure */
   biomeTex: StorageTexture | null = null;
+  /** import manifest when ?import= is active */
+  importManifest: ImportManifest | null = null;
+  /**
+   * When set, scatter reads biome/fields/moisture from this donor field
+   * (world-aligned) while height still comes from this chunk — keeps woodland
+   * continuous across streamed ring tiles that lack their own DEM import.
+   */
+  vegContext: Heightfield | null = null;
   /** CPU height mirror for camera clamping / tools (filled by readback) */
   cpuHeights: Float32Array | null = null;
   /** CPU waterY mirror (sim res) — underwater camera guard */
@@ -95,10 +110,14 @@ export class Heightfield {
     synth: SynthesisResult,
     heightTex: StorageTexture,
     normalTex: StorageTexture,
+    worldOffsetX = 0,
+    worldOffsetZ = 0,
   ) {
     this.cfg = cfg;
     this.mp = mp;
     this.res = synth.res;
+    this.worldOffsetX = worldOffsetX;
+    this.worldOffsetZ = worldOffsetZ;
     this.height = synth.height;
     this.hardness = synth.hardness;
     this.heightTex = heightTex;
@@ -112,10 +131,23 @@ export class Heightfield {
     progress: ProgressFn,
   ): Promise<Heightfield> {
     const cfg = qualityConfig(params.preset);
-    const mp = makeMacroParams(seed);
+    const worldBoot = resolveWorldBoot(params);
+    const importMaps = params.importId ? await loadImportMaps(params.importId) : null;
+    const profileId =
+      worldBoot.mode === 'real' && worldBoot.profile
+        ? worldBoot.profile
+        : (importMaps?.manifest.baseProfile ?? params.profile);
+    const mp = makeMacroParams(seed, profileId);
+    const impOpts = importMaps
+      ? {
+          heights: importMaps.height,
+          res: importMaps.manifest.res,
+          demWeight: importMaps.manifest.demWeight,
+        }
+      : undefined;
 
     progress(0.04, `terrain: synthesizing ${cfg.heightRes}² heightfield`);
-    const synth = await runHeightSynthesis(renderer, cfg.heightRes, mp);
+    const synth = await runHeightSynthesis(renderer, cfg.heightRes, mp, impOpts);
 
     const heightTex = new StorageTexture(cfg.heightRes, cfg.heightRes);
     heightTex.type = FloatType;
@@ -129,6 +161,10 @@ export class Heightfield {
     normalTex.generateMipmaps = false;
 
     const hf = new Heightfield(cfg, mp, synth, heightTex, normalTex);
+    hf.importManifest = importMaps?.manifest ?? null;
+    if (hf.importManifest) {
+      hf.importManifest = enrichImportManifest(hf.importManifest, resolveWorldBoot(params));
+    }
 
     const noise = await bakeNoiseTextures(renderer);
     hf.noiseA = noise.texA;
@@ -136,7 +172,7 @@ export class Heightfield {
 
     // --- erosion at sim res, then detail-preserving compose back to full res --
     progress(0.08, `terrain: synthesizing ${cfg.simRes}² erosion grid`);
-    const synthSim = await runHeightSynthesis(renderer, cfg.simRes, mp);
+    const synthSim = await runHeightSynthesis(renderer, cfg.simRes, mp, impOpts);
 
     progress(0.1, `terrain: eroding (${cfg.erosionIters} iterations)`);
     const erosion = await runErosion(renderer, synthSim.height, synthSim.hardness, {
@@ -182,6 +218,9 @@ export class Heightfield {
     hf.biomeTex = await runBiomeSnow(renderer, hf.height, {
       res: hf.res,
       mp,
+      profileId,
+      importMoisture: importMaps?.moisture,
+      importMoistureRes: importMaps?.manifest.res,
       normalTex: hf.normalTex,
       fieldsTex: hf.fieldsTex,
     });
@@ -194,13 +233,169 @@ export class Heightfield {
     return hf;
   }
 
+  /**
+   * Generate one streamed chunk — `fast` skips erosion/hydrology (ring tiles),
+   * `full` runs the complete pipeline (center / import tiles).
+   */
+  static async generateChunk(
+    renderer: Renderer,
+    params: LaasParams,
+    seed: WorldSeed,
+    progress: ProgressFn,
+    opts: {
+      cx: number;
+      cy: number;
+      mode: 'fast' | 'full';
+      importId?: string | null;
+      profile?: string;
+      noiseA?: StorageTexture | null;
+      noiseB?: StorageTexture | null;
+    },
+  ): Promise<Heightfield> {
+    const { cx, cy, mode } = opts;
+    const center = chunkCenter(cx, cy);
+    const worldOffset: [number, number] = [center.x, center.z];
+    const base = qualityConfig(params.preset);
+    // Ring chunks: half the height/sim resolution — 8 neighbors at full
+    // res thrash memory and GPU harder than a mid Mac can handle.
+    const cfg =
+      mode === 'fast'
+        ? {
+            ...base,
+            heightRes: Math.max(512, Math.floor(base.heightRes / 2)),
+            simRes: Math.max(256, Math.floor(base.simRes / 2)),
+            erosionIters: Math.min(base.erosionIters, 200),
+          }
+        : base;
+    const importMaps = opts.importId ? await loadImportMaps(opts.importId) : null;
+    const profileId = importMaps?.manifest.baseProfile ?? opts.profile ?? params.profile;
+    const mp = makeMacroParams(seed, profileId);
+    const impOpts = importMaps
+      ? {
+          heights: importMaps.height,
+          res: importMaps.manifest.res,
+          demWeight: importMaps.manifest.demWeight,
+        }
+      : undefined;
+    const synOpts = { worldOffset };
+
+    progress(0.04, `chunk (${cx},${cy}): synthesizing ${cfg.heightRes}²`);
+    const synth = await runHeightSynthesis(renderer, cfg.heightRes, mp, impOpts, synOpts);
+
+    const heightTex = new StorageTexture(cfg.heightRes, cfg.heightRes);
+    heightTex.type = FloatType;
+    heightTex.format = RedFormat;
+    heightTex.magFilter = NearestFilter;
+    heightTex.minFilter = NearestFilter;
+    heightTex.generateMipmaps = false;
+
+    const normalTex = new StorageTexture(cfg.heightRes, cfg.heightRes);
+    normalTex.type = HalfFloatType;
+    normalTex.generateMipmaps = false;
+
+    const hf = new Heightfield(cfg, mp, synth, heightTex, normalTex, center.x, center.z);
+    hf.importManifest = importMaps?.manifest ?? null;
+    if (hf.importManifest) {
+      hf.importManifest = enrichImportManifest(hf.importManifest, resolveWorldBoot(params));
+    }
+
+    if (opts.noiseA && opts.noiseB) {
+      hf.noiseA = opts.noiseA;
+      hf.noiseB = opts.noiseB;
+    } else {
+      const noise = await bakeNoiseTextures(renderer);
+      hf.noiseA = noise.texA;
+      hf.noiseB = noise.texB;
+    }
+
+    if (mode === 'fast') {
+      progress(0.5, `chunk (${cx},${cy}): deriving maps`);
+      await hf.rebuildDerivedMaps(renderer);
+      // Ring chunks skip erosion, but terrain materials + scatter need
+      // biome/fields textures — synthesize a lightweight pair from slope.
+      await hf.buildStubFieldsTex(renderer);
+      if (!hf.fieldsTex) throw new Error('stub fieldsTex missing');
+      hf.biomeTex = await runBiomeSnow(renderer, hf.height, {
+        res: hf.res,
+        mp,
+        profileId,
+        normalTex: hf.normalTex,
+        fieldsTex: hf.fieldsTex,
+      });
+      const ab = await renderer.getArrayBufferAsync(hf.height.value);
+      hf.cpuHeights = new Float32Array(ab);
+      return hf;
+    }
+
+    // --- full pipeline (center chunk) -----------------------------------------
+    progress(0.08, `chunk (${cx},${cy}): sim grid ${cfg.simRes}²`);
+    const synthSim = await runHeightSynthesis(renderer, cfg.simRes, mp, impOpts, synOpts);
+
+    progress(0.1, `chunk (${cx},${cy}): eroding`);
+    const erosion = await runErosion(renderer, synthSim.height, synthSim.hardness, {
+      res: cfg.simRes,
+      texel: WORLD_SIZE / cfg.simRes,
+      iters: cfg.erosionIters,
+      onProgress: (d, t) => progress(0.1 + 0.45 * (d / t), `chunk (${cx},${cy}): eroding ${d}/${t}`),
+    });
+    hf.simWater = erosion.water;
+    hf.simSediment = erosion.sediment;
+    hf.simRes = cfg.simRes;
+
+    hf.flow = await runFlowRivers(renderer, erosion.eroded, erosion.water, {
+      res: cfg.simRes,
+      texel: WORLD_SIZE / cfg.simRes,
+      seed: seed.sub(`hydrology-${cx}-${cy}`),
+      mp,
+      hardness: synthSim.hardness,
+      onProgress: (msg, frac) => progress(0.55 + frac * 0.12, msg),
+    });
+
+    hf.waterY = await Heightfield.buildWaterY(
+      renderer,
+      erosion.eroded,
+      hf.flow.waterYRaw,
+      cfg.simRes,
+    );
+    hf.waterFarRes = Math.floor(cfg.simRes / 8);
+    hf.waterYFar = await Heightfield.reduceWaterY(renderer, hf.waterY, cfg.simRes, 8);
+
+    progress(0.7, `chunk (${cx},${cy}): composing eroded field`);
+    await hf.composeEroded(renderer, synthSim.height, erosion.eroded);
+
+    progress(0.82, `chunk (${cx},${cy}): deriving maps`);
+    await hf.rebuildDerivedMaps(renderer);
+    await hf.buildFieldsTex(renderer);
+
+    progress(0.88, `chunk (${cx},${cy}): biome classification`);
+    if (!hf.fieldsTex) throw new Error('fieldsTex missing before biome pass');
+    hf.biomeTex = await runBiomeSnow(renderer, hf.height, {
+      res: hf.res,
+      mp,
+      profileId,
+      importMoisture: importMaps?.moisture,
+      importMoistureRes: importMaps?.manifest.res,
+      normalTex: hf.normalTex,
+      fieldsTex: hf.fieldsTex,
+    });
+
+    progress(0.93, `chunk (${cx},${cy}): height readback`);
+    const ab = await renderer.getArrayBufferAsync(hf.height.value);
+    hf.cpuHeights = new Float32Array(ab);
+    const wab = await renderer.getArrayBufferAsync(hf.waterY.value);
+    hf.cpuWaterY = new Float32Array(wab);
+    return hf;
+  }
+
   /** CPU height lookup (bilinear) — camera clamping, bookmarks, tools */
   heightAtCpu(x: number, z: number): number {
     const hts = this.cpuHeights;
     if (!hts) return 0;
     const res = this.res;
-    const gx = Math.min(Math.max(((x / WORLD_SIZE) + 0.5) * res - 0.5, 0), res - 1.001);
-    const gz = Math.min(Math.max(((z / WORLD_SIZE) + 0.5) * res - 0.5, 0), res - 1.001);
+    const lx = x - this.worldOffsetX;
+    const lz = z - this.worldOffsetZ;
+    const gx = Math.min(Math.max(((lx / WORLD_SIZE) + 0.5) * res - 0.5, 0), res - 1.001);
+    const gz = Math.min(Math.max(((lz / WORLD_SIZE) + 0.5) * res - 0.5, 0), res - 1.001);
     const x0 = Math.floor(gx);
     const z0 = Math.floor(gz);
     const fx = gx - x0;
@@ -217,8 +412,10 @@ export class Heightfield {
     const wy = this.cpuWaterY;
     if (!wy) return -1e4;
     const res = this.simRes;
-    const gx = Math.min(Math.max(((x / WORLD_SIZE) + 0.5) * res - 0.5, 0), res - 1.001);
-    const gz = Math.min(Math.max(((z / WORLD_SIZE) + 0.5) * res - 0.5, 0), res - 1.001);
+    const lx = x - this.worldOffsetX;
+    const lz = z - this.worldOffsetZ;
+    const gx = Math.min(Math.max(((lx / WORLD_SIZE) + 0.5) * res - 0.5, 0), res - 1.001);
+    const gz = Math.min(Math.max(((lz / WORLD_SIZE) + 0.5) * res - 0.5, 0), res - 1.001);
     const x0 = Math.floor(gx);
     const z0 = Math.floor(gz);
     const fx = gx - x0;
@@ -452,6 +649,57 @@ export class Heightfield {
   }
 
   /**
+   * Lightweight moisture/flow stub for streamed ring chunks that skip
+   * full hydrology — enough for biome classification + grass gating.
+   */
+  async buildStubFieldsTex(renderer: Renderer): Promise<void> {
+    const res = this.res;
+    this.simRes = res;
+    const tex = new StorageTexture(res, res);
+    tex.type = HalfFloatType;
+    tex.generateMipmaps = false;
+    const height = this.height;
+    const normalTex = this.normalTex;
+    const kernel = Fn(() => {
+      const i = instanceIndex;
+      If(i.greaterThanEqual(res * res), () => {
+        Return();
+      });
+      const x = i.mod(res);
+      const y = i.div(res);
+      const uv = vec2(float(x).add(0.5), float(y).add(0.5)).div(res);
+      const h = height.element(i);
+      const slope = (texture(normalTex, uv, 0) as unknown as NV4).w;
+      // modest moisture on gentle slopes; dry on steep rock
+      const moist = float(1)
+        .sub(smoothstep(0.25, 0.85, slope))
+        .mul(0.55)
+        .add(0.2);
+      textureStore(
+        tex,
+        uvec2(x.toUint(), y.toUint()),
+        vec4(moist, float(0.05), float(0), h.sub(2)),
+      ).toWriteOnly();
+    })().compute(res * res);
+    kernel.setName('stubFieldsTexPack');
+    await renderer.computeAsync(kernel);
+    this.fieldsTex = tex;
+    // dry sentinel — walk physics still works without real hydrology
+    this.waterY = instancedArray(res * res, 'float');
+    const dryK = Fn(() => {
+      const i = instanceIndex;
+      If(i.greaterThanEqual(res * res), () => {
+        Return();
+      });
+      this.waterY!.element(i).assign(height.element(i).sub(2));
+    })().compute(res * res);
+    dryK.setName('stubWaterY');
+    await renderer.computeAsync(dryK);
+    const wab = await renderer.getArrayBufferAsync(this.waterY.value);
+    this.cpuWaterY = new Float32Array(wab);
+  }
+
+  /**
    * height ← upsample(eroded_sim) + (height_full − upsample(preSim)).
    * Keeps full-res synthesis micro-detail riding on the eroded macro field.
    * Also snapshots the pre-erosion full-res height for the split view.
@@ -520,7 +768,7 @@ export class Heightfield {
 
   /** world xz (m) → uv in [0,1]² over the height grid */
   uvFromWorld(p: NV2): NV2 {
-    return p.div(WORLD_SIZE).add(0.5);
+    return p.sub(vec2(this.worldOffsetX, this.worldOffsetZ)).div(WORLD_SIZE).add(0.5);
   }
 
   /**

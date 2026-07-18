@@ -49,6 +49,7 @@ import { WORLD_SIZE } from '../../world/WorldConst';
 import { canopyAt } from './Scatter';
 import type { ProbeGI } from './ProbeGI';
 import { gustAt, windContext, windU } from '../../render/Wind';
+import { climateColdK, climateContext } from '../../atmosphere/ClimateClock';
 
 export const PARTICLE_COUNT = 131072;
 const BOX_R = 36; // m, horizontal half-extent around the camera
@@ -79,7 +80,9 @@ export class Particles {
       const uvW = clamp(p.xz.div(WORLD_SIZE).add(0.5), 0, 1);
       const snow = (texture(biomeTex, uvW, 0) as unknown as NV4).y;
       const cov = canopyTex ? canopyAt(canopyTex, p.xz) : (float(0) as NF);
-      const isSnow = snow.greaterThan(0.35);
+      const isSnow = climateContext()
+        ? snow.add(climateColdK().mul(0.35)).greaterThan(0.35)
+        : snow.greaterThan(0.35);
       const leafRoll = h.lessThan(0.45).and(cov.greaterThan(0.3));
       return isSnow.select(
         float(T_SNOW),
@@ -268,5 +271,9 @@ export class Particles {
     this.uCamUp.value.set(e[4] ?? 0, e[5] ?? 1, e[6] ?? 0).normalize();
     this.uDt.value = Math.min(Math.max(dt, 0), 0.05);
     renderer.compute(this.stepK);
+  }
+
+  setWeatherMode(_mode: 'default' | 'snow' | 'pollen' | 'dust' | 'rain'): void {
+    // reserved — particle type bias wired in a follow-up pass
   }
 }

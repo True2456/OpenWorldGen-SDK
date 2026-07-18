@@ -30,6 +30,8 @@ import {
 } from 'three/tsl';
 import type { Rng, WorldSeed } from '../core/Seed';
 import type { NF, NV2 } from '../gpu/TSLTypes';
+import type { LayoutScales } from '../contracts/biome';
+import { getProfile } from './profiles/registry';
 import { KARST_PLATEAU, LAKE_LEVEL, WORLD_HALF } from './WorldConst';
 
 export interface MacroParams {
@@ -40,6 +42,8 @@ export interface MacroParams {
   karstC: [number, number];
   karstR: number;
   karstRot: number;
+  /** profile-driven amplitude scales for macroTerrain */
+  layoutScales: LayoutScales;
   /** main valley polyline NE→SW with floor elevations at each vertex */
   valley: [number, number][];
   valleyFloors: number[];
@@ -56,7 +60,9 @@ function jit(rng: Rng, base: [number, number], amount: number): [number, number]
   return [base[0] + rng.range(-amount, amount), base[1] + rng.range(-amount, amount)];
 }
 
-export function makeMacroParams(seed: WorldSeed): MacroParams {
+export function makeMacroParams(seed: WorldSeed, profileId?: string): MacroParams {
+  const profile = getProfile(profileId);
+  const ls = profile.layout;
   // separate streams per component: adding draws to one never re-rolls others
   const rngAnchor = seed.rng('macro-anchors');
   const rngValley = seed.rng('macro-valley');
@@ -87,12 +93,13 @@ export function makeMacroParams(seed: WorldSeed): MacroParams {
   ];
   return {
     alpC: jit(rngAnchor, [1460, -1470], 150),
-    alpR: 1820 + rngAnchor.range(-120, 120),
+    alpR: (1820 + rngAnchor.range(-120, 120)) * ls.alpine,
     lakeC,
-    lakeR: 600 + rngAnchor.range(-60, 60),
+    lakeR: (600 + rngAnchor.range(-60, 60)) * ls.lake,
     karstC,
-    karstR: 900 + rngAnchor.range(-80, 80),
+    karstR: (900 + rngAnchor.range(-80, 80)) * ls.karst,
     karstRot: 0.35 + rngAnchor.range(-0.25, 0.25),
+    layoutScales: ls,
     valley,
     // lake sill ≈ 141 at the rim, outlet descends off-map
     valleyFloors: [690, 468, 300, 212, 172, 141, 133, 120],
@@ -273,7 +280,7 @@ export function macroTerrain(p: NV2, mp: MacroParams, detail: 'full' | 'far'): M
   const hillsN = hillsRaw.oneMinus().pow(1.7).oneMinus();
   const hillsMask = tAlp.oneMinus().mul(tKarst.mul(0.72).oneMinus());
   const base = float(192)
-    .add(hillsN.mul(135).mul(hillsMask))
+    .add(hillsN.mul(135).mul(hillsMask).mul(mp.layoutScales.hillsAmp))
     .add(float(KARST_PLATEAU - 192).mul(tKarst))
     .sub(tLake.pow(1.5).mul(110));
 
@@ -300,7 +307,9 @@ export function macroTerrain(p: NV2, mp: MacroParams, detail: 'full' | 'far'): M
     }
     ridge = ridge.div(norm);
   }
-  const mountains = tAlp.mul(ridge.pow(1.5).mul(1380).add(tAlp.mul(470)));
+  const mountains = tAlp
+    .mul(ridge.pow(1.5).mul(1380).add(tAlp.mul(470)))
+    .mul(mp.layoutScales.ridgeAmp);
 
   // --- karst towers (full detail only — far shell sees plateau mass) ---------
   let towers: NF = float(0);

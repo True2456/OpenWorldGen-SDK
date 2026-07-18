@@ -15,12 +15,21 @@ import { parseCamString, parseParams } from './core/Params';
 import { WorldSeed } from './core/Seed';
 import { Hud } from './debug/HUD';
 import { buildGalleryScene } from './debug/GalleryScene';
+import { buildDroneScene } from './debug/DroneScene';
+import { buildHerdScene } from './debug/HerdScene';
 import { buildSanityScene } from './debug/SanityScene';
 import { buildShadowTestScene } from './debug/ShadowTestScene';
 import { buildTerrainScene } from './debug/TerrainScene';
 import { buildScene, registerScene, type WorldContext } from './debug/Scenes';
 
 async function boot(): Promise<void> {
+  const g = window as unknown as { __laasBootPromise?: Promise<void> };
+  if (g.__laasBootPromise) return g.__laasBootPromise;
+  g.__laasBootPromise = bootOnce();
+  return g.__laasBootPromise;
+}
+
+async function bootOnce(): Promise<void> {
   const hooks = initHooks();
   installGlobalErrorHooks();
   // environment gate BEFORE any loading: mobile / non-Chromium / missing
@@ -60,6 +69,8 @@ async function boot(): Promise<void> {
   registerScene('sanity', buildSanityScene);
   registerScene('terrain', buildTerrainScene);
   registerScene('gallery', buildGalleryScene);
+  registerScene('herd', buildHerdScene);
+  registerScene('drone', buildDroneScene);
   registerScene('shadowtest', buildShadowTestScene);
   // 'world' becomes the streamed open world once terrain tiles land.
   registerScene('world', buildTerrainScene);
@@ -88,7 +99,16 @@ async function boot(): Promise<void> {
     }
   }
 
-  new Hud(engine, params);
+  const hud = new Hud(engine, params);
+  if (hooks.getSeason) {
+    const getSeason = hooks.getSeason;
+    hud.addProvider(() => {
+      const s = getSeason();
+      return [
+        `season ${s.label}  day ${s.day.toFixed(0)}  cold ${(s.coldK * 100).toFixed(0)}%  growth ${(s.growthK * 100).toFixed(0)}%`,
+      ];
+    });
+  }
 
   hooks.setPose = (p) => fly.setPose(p);
   hooks.getPose = () => fly.getPose();
@@ -96,6 +116,7 @@ async function boot(): Promise<void> {
   hooks.flyCamEnabled = (on) => {
     fly.enabled = on;
   };
+  if (hooks.disableFlyCam) fly.enabled = false;
 
   engine.start();
   await engine.settle(6);

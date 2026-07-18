@@ -19,7 +19,6 @@ import { TREE_VARIANTS, VegClass } from '../gpu/passes/Scatter';
 import {
   barkTexturedMaterial,
   deadwoodMaterial,
-  flowerMaterial,
   foliageCardMaterial,
   foliageMaterial,
   rockMaterial,
@@ -29,16 +28,10 @@ import { captureFoliageAtlas } from './FoliageCards';
 import { twigGeometry } from './GroundCover';
 import { captureImpostor, type ImpostorAtlas, type ImpostorPart } from './Impostors';
 import { buildRock } from './RockBuilder';
-import { TREE_SPECIES } from './Species';
+import { treeSpeciesForRegion } from './RegionVeg';
 import { buildTree, type HeroDiet } from './TreeBuilder';
-import {
-  buildFern,
-  buildFlower,
-  buildShrub,
-  FERN_CAPTURE,
-  UNDERSTORY_SPECIES,
-  type FlowerKind,
-} from './Understory';
+import { getVegPerf } from './VegPerf';
+import { VegetationRegistry } from '../sdk/Registry';
 import type { GrowthInstance, SpeciesParams } from './VegTypes';
 
 export interface PoolPart {
@@ -78,13 +71,35 @@ export const HERO_DIETS: Record<string, HeroDiet> = {
   birch: { meshAnchorTarget: 4000, barkK: 1 },
   karst: { meshAnchorTarget: 4000, barkK: 1.1 },
   snag: { barkK: 1.3 },
+  mesquite: { meshAnchorTarget: 1200, barkK: 0.9 },
+  joshua: { meshAnchorTarget: 600, barkK: 0.85 },
+  tropicalFig: { meshAnchorTarget: 2800, barkK: 0.55 },
+  palm: { meshAnchorTarget: 400, barkK: 0.75 },
+  cypress: { meshAnchorTarget: 900, barkK: 0.8 },
+  willow: { meshAnchorTarget: 3200, barkK: 0.7 },
+  oak: { meshAnchorTarget: 2600, barkK: 0.65 },
+  acacia: { meshAnchorTarget: 1800, barkK: 0.8 },
+  eucalyptus: { meshAnchorTarget: 1400, barkK: 0.75 },
+  kauri: { meshAnchorTarget: 1100, barkK: 0.7 },
+  banksia: { meshAnchorTarget: 900, barkK: 0.85 },
+  'wollemi-pine': { meshAnchorTarget: 1200, barkK: 0.8 },
 };
+
+function heroDietFor(id: string): HeroDiet {
+  const base = HERO_DIETS[id] ?? { cardTarget: 1500, meshAnchorTarget: 1200 };
+  const k = getVegPerf().heroMeshScale;
+  if (k >= 0.99) return base;
+  const out: HeroDiet = { ...base };
+  if (out.meshAnchorTarget) out.meshAnchorTarget = Math.max(80, Math.round(out.meshAnchorTarget * k));
+  if (out.barkK) out.barkK = Math.min(1.15, out.barkK * (0.85 + k * 0.15));
+  return out;
+}
 
 export interface VegLib {
   pools: VegPool[];
   /** tree species cls → octahedral impostor atlas (captured from variant 0) */
   impostors: Map<number, ImpostorAtlas>;
-  /** per-class cull data, indexed by VegClass (length 20) */
+  /** per-class cull data, indexed by VegClass */
   clsHeight: number[];
   clsRadius: number[];
   clsMaxDist: number[];
@@ -92,11 +107,7 @@ export interface VegLib {
   barks: Map<number, BarkTextures>;
 }
 
-const FLOWER_COLOR: Record<FlowerKind, { r: number; g: number; b: number }> = {
-  umbel: { r: 0.75, g: 0.75, b: 0.7 },
-  bell: { r: 0.28, g: 0.14, b: 0.5 },
-  daisy: { r: 0.85, g: 0.72, b: 0.12 },
-};
+
 
 function bounds(geos: BufferGeometry[]): { height: number; radius: number } {
   let height = 0.5;
@@ -127,17 +138,29 @@ export async function buildVegLibrary(
   renderer: Renderer,
   seed: WorldSeed,
   progress: (p: number, msg: string) => void = () => {},
+  regionId: string | null = null,
+  zoneId: string | null = null,
+  stateId: string | null = null,
 ): Promise<VegLib> {
-  // ---- shared captures -------------------------------------------------------
+  const treeSpecies = treeSpeciesForRegion(regionId, zoneId, stateId);
   progress(0, 'veg: capturing foliage atlases');
   const atlases = new Map<string, DataTexture>();
-  for (const sp of [...TREE_SPECIES, ...UNDERSTORY_SPECIES, FERN_CAPTURE]) {
+  const captureSources: SpeciesParams[] = [...treeSpecies];
+  for (const item of VegetationRegistry.listUnderstory()) {
+    if (item.captureParams) {
+      captureSources.push({
+        ...item.captureParams,
+        id: item.id, // align ID for atlas map query
+      });
+    }
+  }
+  for (const sp of captureSources) {
     if (!sp.foliage || atlases.has(sp.id)) continue;
     atlases.set(sp.id, await captureFoliageAtlas(renderer, sp, seed.rng(`cards/${sp.id}`)));
   }
   progress(0.2, 'veg: baking bark textures');
   const barks = new Map<number, BarkTextures>();
-  const layers = new Set<number>([...TREE_SPECIES.map((s) => s.barkLayer), 2, 5]);
+  const layers = new Set<number>([...treeSpecies.map((s) => s.barkLayer), 2, 5]);
   for (const layer of layers) {
     barks.set(layer, await bakeBarkTextures(renderer, layer, seed.sub(`bark/${layer}`) % 977));
   }
@@ -148,9 +171,9 @@ export async function buildVegLibrary(
   };
 
   const pools: VegPool[] = [];
-  const clsHeight = new Array<number>(24).fill(1);
-  const clsRadius = new Array<number>(24).fill(1);
-  const clsMaxDist = new Array<number>(24).fill(150);
+  const clsHeight = new Array<number>(40).fill(1);
+  const clsRadius = new Array<number>(40).fill(1);
+  const clsMaxDist = new Array<number>(40).fill(150);
   const trackCls = (cls: number, h: number, r: number): void => {
     clsHeight[cls] = Math.max(clsHeight[cls] ?? 1, h);
     clsRadius[cls] = Math.max(clsRadius[cls] ?? 1, r);
@@ -179,8 +202,8 @@ export async function buildVegLibrary(
     return parts;
   };
 
-  for (let ci = 0; ci < TREE_SPECIES.length; ci++) {
-    const sp = TREE_SPECIES[ci] as SpeciesParams;
+  for (let ci = 0; ci < treeSpecies.length; ci++) {
+    const sp = treeSpecies[ci] as SpeciesParams;
     for (let v = 0; v < TREE_VARIANTS; v++) {
       const label = `veg/${sp.id}/${v}`;
       const inst = variantInstance(seed, sp.id, v);
@@ -191,7 +214,7 @@ export async function buildVegLibrary(
         lod: 0,
         inst,
         foliageMode: 'hybrid',
-        hero: HERO_DIETS[sp.id] ?? { cardTarget: 1500, meshAnchorTarget: 1200 },
+        hero: heroDietFor(sp.id),
       });
       const t1 = buildTree(sp, seed.rng(label), { lod: 1, inst });
       const t2 = buildTree(sp, seed.rng(label), { lod: 2, inst });
@@ -223,14 +246,14 @@ export async function buildVegLibrary(
       });
     }
     clsMaxDist[ci] = 1e8; // trees continue as impostors
-    progress(0.3 + 0.25 * ((ci + 1) / TREE_SPECIES.length), `veg: ${sp.id} pool`);
+    progress(0.3 + 0.25 * ((ci + 1) / treeSpecies.length), `veg: ${sp.id} pool`);
   }
 
   // ---- tree impostors (variant 0 R1 geometry, relightable octahedral) -------
   progress(0.56, 'veg: capturing octahedral impostors');
   const impostors = new Map<number, ImpostorAtlas>();
-  for (let ci = 0; ci < TREE_SPECIES.length; ci++) {
-    const sp = TREE_SPECIES[ci] as SpeciesParams;
+  for (let ci = 0; ci < treeSpecies.length; ci++) {
+    const sp = treeSpecies[ci] as SpeciesParams;
     const t = buildTree(sp, seed.rng(`veg/${sp.id}/0`), {
       lod: 1,
       inst: variantInstance(seed, sp.id, 0),
@@ -249,112 +272,31 @@ export async function buildVegLibrary(
       ci,
       await captureImpostor(renderer, parts, { centerY: t.stats.height * 0.5, radius }),
     );
-    progress(0.56 + 0.18 * ((ci + 1) / TREE_SPECIES.length), `veg: impostor ${sp.id}`);
+    progress(0.56 + 0.18 * ((ci + 1) / treeSpecies.length), `veg: impostor ${sp.id}`);
   }
 
-  // ---- understory: shrubs / fern / flowers (R1 only) -------------------------
+  // ---- understory pools (dynamic) ----------
   progress(0.76, 'veg: understory pools');
-  const underSpecies = [
-    { cls: VegClass.BushHazel, sp: UNDERSTORY_SPECIES[0] as SpeciesParams },
-    { cls: VegClass.BushPink, sp: UNDERSTORY_SPECIES[1] as SpeciesParams },
-    { cls: VegClass.Juniper, sp: UNDERSTORY_SPECIES[2] as SpeciesParams },
-  ];
-  for (const { cls, sp } of underSpecies) {
+  const understoryItems = VegetationRegistry.listUnderstory();
+  for (const item of understoryItems) {
+    const atlas = atlases.get(item.id);
     for (let v = 0; v < 4; v++) {
-      const rng = seed.rng(`veg/${sp.id}/${v}`);
-      const shrub = buildShrub(sp, rng);
-      const atlas = atlases.get(sp.id);
-      const parts: PoolPart[] = [
-        {
-          geo: shrub.bark,
-          tris: shrub.bark.index ? shrub.bark.index.count / 3 : 0,
-          make: () => barkTexturedMaterial(barkOf(2)),
-          castShadow: true,
-        },
-      ];
-      if (shrub.foliage && atlas) {
-        parts.push({
-          geo: shrub.foliage,
-          tris: shrub.foliage.index ? shrub.foliage.index.count / 3 : 0,
-          make: () => foliageCardMaterial(atlas, { color: sp.foliageColor }),
-          castShadow: true,
-        });
-      }
+      const rng = seed.rng(`veg/${item.id}/${v}`);
+      const parts = item.buildParts(rng, atlas, barkOf);
       const b = bounds(parts.map((p) => p.geo));
-      trackCls(cls, b.height, b.radius);
+      trackCls(item.cls, b.height, b.radius);
       pools.push({
-        cls,
+        cls: item.cls,
         variant: v,
         r1: parts,
         r2: null,
-        trisR1: shrub.tris,
+        trisR1: parts.reduce((acc, p) => acc + p.tris, 0),
         trisR2: 0,
         height: b.height,
         radius: b.radius,
       });
     }
-    clsMaxDist[cls] = 170;
-  }
-  // ferns
-  const fernAtlas = atlases.get('fern');
-  for (let v = 0; v < 4; v++) {
-    const geo = buildFern(seed.rng(`veg/fern/${v}`));
-    const tris = geo.index ? geo.index.count / 3 : 0;
-    const b = bounds([geo]);
-    trackCls(VegClass.Fern, b.height, b.radius);
-    pools.push({
-      cls: VegClass.Fern,
-      variant: v,
-      r1: fernAtlas
-        ? [
-            {
-              geo,
-              tris,
-              make: () =>
-                foliageCardMaterial(fernAtlas, { color: FERN_CAPTURE.foliageColor }),
-              castShadow: false,
-            },
-          ]
-        : null,
-      r2: null,
-      trisR1: tris,
-      trisR2: 0,
-      height: b.height,
-      radius: b.radius,
-    });
-  }
-  clsMaxDist[VegClass.Fern] = 140;
-  // flowers
-  const flowerKinds: { cls: number; kind: FlowerKind }[] = [
-    { cls: VegClass.FlowerUmbel, kind: 'umbel' },
-    { cls: VegClass.FlowerBell, kind: 'bell' },
-    { cls: VegClass.FlowerDaisy, kind: 'daisy' },
-  ];
-  for (const { cls, kind } of flowerKinds) {
-    for (let v = 0; v < 4; v++) {
-      const geo = buildFlower(kind, seed.rng(`veg/flower/${kind}/${v}`));
-      const tris = geo.index ? geo.index.count / 3 : 0;
-      const b = bounds([geo]);
-      trackCls(cls, b.height, b.radius);
-      pools.push({
-        cls,
-        variant: v,
-        r1: [
-          {
-            geo,
-            tris,
-            make: () => flowerMaterial(FLOWER_COLOR[kind]),
-            castShadow: false,
-          },
-        ],
-        r2: null,
-        trisR1: tris,
-        trisR2: 0,
-        height: b.height,
-        radius: b.radius,
-      });
-    }
-    clsMaxDist[cls] = 90;
+    clsMaxDist[item.cls] = item.maxDist;
   }
 
   // ---- extras: deadfall + boulders/slabs -------------------------------------

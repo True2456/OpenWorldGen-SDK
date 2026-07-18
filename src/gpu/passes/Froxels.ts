@@ -76,6 +76,7 @@ export class Froxels {
   private readonly uCamWorld = uniform(new Matrix4());
   /** base fog density scale (?fog=N) */
   readonly fogK = uniform(0.4);
+  private baseFogK = 0.4;
 
   constructor(
     hf: Heightfield,
@@ -237,6 +238,16 @@ export class Froxels {
     this.uCamWorld.value.copy(camera.matrixWorld);
     renderer.compute(this.scatterK);
     renderer.compute(this.integK);
+  }
+
+  /** Remember current fog scale after URL overrides (?fog=) */
+  captureBaseFog(): void {
+    this.baseFogK = this.fogK.value;
+  }
+
+  /** Weather preset multiplier from ?weather= */
+  setWeatherScale(scale: number): void {
+    this.fogK.value = this.baseFogK * Math.max(0.05, scale);
   }
 
   /** composite: fog applied to a fragment color (dist in meters) */

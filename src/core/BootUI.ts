@@ -16,6 +16,7 @@ export class BootUI {
   }
 
   set(progress: number, message: string): void {
+    console.log(`[laas progress] ${(progress * 100).toFixed(0)}%: ${message}`);
     this.hooks.progress = progress;
     this.hooks.progressMsg = message;
     if (this.msg) this.msg.textContent = message;

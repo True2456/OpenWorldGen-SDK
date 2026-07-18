@@ -63,9 +63,51 @@ import {
   type FlowerKind,
   UNDERSTORY_SPECIES,
 } from '../vegetation/Understory';
+import {
+  installAfricaAnimalsGalleryRow,
+  installAnimalsGalleryRow,
+  installAsiaAnimalsGalleryRow,
+  installEuropeAnimalsGalleryRow,
+  installNorthAmericaAnimalsGalleryRow,
+  installOceaniaAnimalsGalleryRow,
+  installSouthAmericaAnimalsGalleryRow,
+} from '../animals/library/gallery';
+import { installAfricaPlantsGalleryRow, installAfricaTreesGalleryRow, installAsiaTreesGalleryRow, installEuropeTreesGalleryRow, installNorthAmericaTreesGalleryRow, installOceaniaTreesGalleryRow, installSouthAmericaTreesGalleryRow, installNewPlantsGalleryRow } from '../vegetation/library/gallery';
+import {
+  AFRICA_TREE_SPECIES, AFRICA_TREE_BARK_LAYERS,
+  ASIA_TREE_SPECIES, ASIA_TREE_BARK_LAYERS,
+  EUROPE_TREE_SPECIES, EUROPE_TREE_BARK_LAYERS,
+  NORTH_AMERICA_TREE_SPECIES, NORTH_AMERICA_TREE_BARK_LAYERS,
+  SOUTH_AMERICA_TREE_SPECIES, SOUTH_AMERICA_TREE_BARK_LAYERS,
+  OCEANIA_TREE_SPECIES, OCEANIA_TREE_BARK_LAYERS,
+  CONTINENT_TREE_ROW_SPECIES, CONTINENT_TREE_ROW_BARK,
+} from '../vegetation/library/continent-trees';
+import { buildLupine } from '../vegetation/Lupine';
+import { RHODODENDRON } from '../vegetation/Rhododendron';
 import type { WorldContext } from './Scenes';
 
-const ROW_Z = { hero: -26, trees: 0, rocks: 40, ground: 70, dead: 100 } as const;
+const ROW_Z = {
+  hero: -26,
+  trees: 0,
+  rocks: 40,
+  ground: 70,
+  dead: 100,
+  newPlants: 130,
+  africaPlants: 160,
+  africaTrees: 190,
+  asiaTrees: 220,
+  europeTrees: 250,
+  northAmericaTrees: 280,
+  southAmericaTrees: 310,
+  oceaniaTrees: 340,
+  animals: 370,
+  africaAnimals: 400,
+  asiaAnimals: 430,
+  europeAnimals: 460,
+  northAmericaAnimals: 490,
+  southAmericaAnimals: 520,
+  oceaniaAnimals: 550,
+} as const;
 
 function labelSprite(text: string, sub: string): Mesh {
   const cv = document.createElement('canvas');
@@ -94,6 +136,9 @@ function labelSprite(text: string, sub: string): Mesh {
 export async function buildGalleryScene(ctx: WorldContext): Promise<void> {
   const { engine, params, seed } = ctx;
   const q = new URLSearchParams(window.location.search);
+  const rowFocus = q.get('row');
+  const lite = q.get('lite') === '1';
+  const skipHeavyRows = lite && !!rowFocus;
 
   ctx.progress(0.05, 'gallery: sky');
   const sunSky = new SunSky(engine, params.timeOfDay);
@@ -162,7 +207,10 @@ export async function buildGalleryScene(ctx: WorldContext): Promise<void> {
   // ---- foliage cluster atlases (captured once per species) -------------------
   ctx.progress(0.08, 'gallery: capturing foliage atlases');
   const atlases = new Map<string, DataTexture>();
-  for (const sp of [...TREE_SPECIES, ...UNDERSTORY_SPECIES, FERN_CAPTURE]) {
+  const rowAtlasSpecies = skipHeavyRows
+    ? (CONTINENT_TREE_ROW_SPECIES[rowFocus!] ?? [])
+    : [...TREE_SPECIES, ...UNDERSTORY_SPECIES, ...AFRICA_TREE_SPECIES, ...ASIA_TREE_SPECIES, ...EUROPE_TREE_SPECIES, ...NORTH_AMERICA_TREE_SPECIES, ...SOUTH_AMERICA_TREE_SPECIES, ...OCEANIA_TREE_SPECIES, FERN_CAPTURE, RHODODENDRON];
+  for (const sp of rowAtlasSpecies) {
     if (!sp.foliage) continue;
     atlases.set(
       sp.id,
@@ -173,12 +221,17 @@ export async function buildGalleryScene(ctx: WorldContext): Promise<void> {
   // ---- bark textures (synthesized per species layer) -------------------------
   ctx.progress(0.09, 'gallery: synthesizing bark');
   const barks = new Map<number, BarkTextures>();
-  for (const sp of TREE_SPECIES) {
-    if (barks.has(sp.barkLayer)) continue;
-    barks.set(
-      sp.barkLayer,
-      await bakeBarkTextures(engine.renderer, sp.barkLayer, seed.sub(`bark/${sp.barkLayer}`) % 977),
-    );
+  const bakeLayer = async (layer: number) => {
+    if (barks.has(layer)) return;
+    barks.set(layer, await bakeBarkTextures(engine.renderer, layer, seed.sub(`bark/${layer}`) % 977));
+  };
+  if (skipHeavyRows) {
+    for (const layer of CONTINENT_TREE_ROW_BARK[rowFocus!] ?? []) await bakeLayer(layer);
+  } else {
+    for (const sp of TREE_SPECIES) await bakeLayer(sp.barkLayer);
+    for (const layer of [...AFRICA_TREE_BARK_LAYERS, ...ASIA_TREE_BARK_LAYERS, ...EUROPE_TREE_BARK_LAYERS, ...NORTH_AMERICA_TREE_BARK_LAYERS, ...SOUTH_AMERICA_TREE_BARK_LAYERS, ...OCEANIA_TREE_BARK_LAYERS]) {
+      await bakeLayer(layer);
+    }
   }
   if (q.get('view') === 'atlas') {
     // raw atlas inspection row behind the trees
@@ -196,7 +249,8 @@ export async function buildGalleryScene(ctx: WorldContext): Promise<void> {
     }
   }
 
-  // ---- tree row: 6 species × 3 seeds ------------------------------------------
+  // ---- tree row: 14 species × 3 seeds -----------------------------------------
+  if (!skipHeavyRows) {
   let totalTris = 0;
   const spacing = 13;
   const groupGap = 6;
@@ -468,6 +522,27 @@ export async function buildGalleryScene(ctx: WorldContext): Promise<void> {
       exhibit(sx, GZ + 2.5, sp.label, 'multi-stem', { pedestal: false });
       sx += 9;
     }
+
+    // Lupine patches (blue, purple, violet)
+    let lx = 62;
+    const lupineColors = [
+      { color: { r: 0.18, g: 0.22, b: 0.75 }, label: 'Blue Lupine' },
+      { color: { r: 0.35, g: 0.15, b: 0.65 }, label: 'Purple Lupine' },
+      { color: { r: 0.55, g: 0.18, b: 0.72 }, label: 'Violet Lupine' },
+    ];
+    for (const lc of lupineColors) {
+      const rngL = seed.rng(`lupine/${lc.label}`);
+      const nLupines = 12;
+      for (let i = 0; i < nLupines; i++) {
+        const fl = new Mesh(buildLupine(rngL.fork(String(i))), flowerMaterial(lc.color));
+        fl.position.set(lx + (rngL.float() - 0.5) * 2.2, 0, GZ + (rngL.float() - 0.5) * 2.2);
+        fl.rotation.y = rngL.float() * 6.28;
+        fl.castShadow = true;
+        engine.scene.add(fl);
+      }
+      exhibit(lx, GZ + 2, lc.label, `×${nLupines}`, { pedestal: false });
+      lx += 7;
+    }
   }
 
   // ---- dead row: logs (3 decay states), stumps --------------------------------
@@ -506,8 +581,57 @@ export async function buildGalleryScene(ctx: WorldContext): Promise<void> {
     engine.scene.add(m);
   }
   exhibit(11, DZ + 2.5, 'Stumps ×2', 'root flare, jagged top', { pedestal: false });
+  } // skipHeavyRows
+
+  // ---- continent / new plant rows (library catalog) ---------------------------
+  if (!rowFocus || rowFocus === 'newPlants') {
+    installNewPlantsGalleryRow(engine, seed, barks, atlases, exhibit, ROW_Z.newPlants);
+  }
+  if (!rowFocus || rowFocus === 'africaPlants') {
+    installAfricaPlantsGalleryRow(engine, seed, barks, atlases, exhibit, ROW_Z.africaPlants);
+  }
+  if (!rowFocus || rowFocus === 'africaTrees') {
+    installAfricaTreesGalleryRow(engine, seed, barks, atlases, exhibit, ROW_Z.africaTrees);
+  }
+  if (!rowFocus || rowFocus === 'asiaTrees') {
+    installAsiaTreesGalleryRow(engine, seed, barks, atlases, exhibit, ROW_Z.asiaTrees);
+  }
+  if (!rowFocus || rowFocus === 'europeTrees') {
+    installEuropeTreesGalleryRow(engine, seed, barks, atlases, exhibit, ROW_Z.europeTrees);
+  }
+  if (!rowFocus || rowFocus === 'northAmericaTrees') {
+    installNorthAmericaTreesGalleryRow(engine, seed, barks, atlases, exhibit, ROW_Z.northAmericaTrees);
+  }
+  if (!rowFocus || rowFocus === 'southAmericaTrees') {
+    installSouthAmericaTreesGalleryRow(engine, seed, barks, atlases, exhibit, ROW_Z.southAmericaTrees);
+  }
+  if (!rowFocus || rowFocus === 'oceaniaTrees') {
+    installOceaniaTreesGalleryRow(engine, seed, barks, atlases, exhibit, ROW_Z.oceaniaTrees);
+  }
+  if (!rowFocus || rowFocus === 'animals') {
+    installAnimalsGalleryRow(engine, seed, exhibit, ROW_Z.animals);
+  }
+  if (!rowFocus || rowFocus === 'africaAnimals') {
+    installAfricaAnimalsGalleryRow(engine, seed, exhibit, ROW_Z.africaAnimals);
+  }
+  if (!rowFocus || rowFocus === 'asiaAnimals') {
+    installAsiaAnimalsGalleryRow(engine, seed, exhibit, ROW_Z.asiaAnimals);
+  }
+  if (!rowFocus || rowFocus === 'europeAnimals') {
+    installEuropeAnimalsGalleryRow(engine, seed, exhibit, ROW_Z.europeAnimals);
+  }
+  if (!rowFocus || rowFocus === 'northAmericaAnimals') {
+    installNorthAmericaAnimalsGalleryRow(engine, seed, exhibit, ROW_Z.northAmericaAnimals);
+  }
+  if (!rowFocus || rowFocus === 'southAmericaAnimals') {
+    installSouthAmericaAnimalsGalleryRow(engine, seed, exhibit, ROW_Z.southAmericaAnimals);
+  }
+  if (!rowFocus || rowFocus === 'oceaniaAnimals') {
+    installOceaniaAnimalsGalleryRow(engine, seed, exhibit, ROW_Z.oceaniaAnimals);
+  }
 
   // ---- hero row: mesh-foliage hero trees (>=100k tris floor) ------------------
+  if (!skipHeavyRows) {
   ctx.progress(0.96, 'gallery: hero trees');
   await new Promise((r) => setTimeout(r, 0));
   {
@@ -596,6 +720,7 @@ export async function buildGalleryScene(ctx: WorldContext): Promise<void> {
       exhibit(-150, ROW_Z.trees, 'Impostor preview', '8×8 oct capture', { pedestal: false });
     }
   }
+  } // skipHeavyRows (hero + impostor)
 
   // ---- post stack (no clouds in the gallery) ----------------------------------
   ctx.progress(0.95, 'gallery: post pipeline');
@@ -614,8 +739,27 @@ export async function buildGalleryScene(ctx: WorldContext): Promise<void> {
   if (params.cam === null) {
     const row = (q.get('row') ?? 'trees') as keyof typeof ROW_Z;
     const z = ROW_Z[row] ?? 0;
-    engine.camera.position.set(0, 13, z + 64);
-    engine.camera.lookAt(new Vector3(0, 9, z));
+    if (row === 'newPlants') {
+      engine.camera.position.set(0, 8.5, z + 55);
+      engine.camera.lookAt(new Vector3(0, 2.5, z));
+    } else if (
+      row === 'animals' ||
+      row === 'africaAnimals' ||
+      row === 'asiaAnimals' ||
+      row === 'europeAnimals' ||
+      row === 'northAmericaAnimals' ||
+      row === 'southAmericaAnimals' ||
+      row === 'oceaniaAnimals'
+    ) {
+      engine.camera.position.set(0, 9, z + 58);
+      engine.camera.lookAt(new Vector3(0, 1.8, z));
+    } else if (row === 'africaPlants' || row === 'africaTrees' || row === 'asiaTrees' || row === 'europeTrees' || row === 'northAmericaTrees' || row === 'southAmericaTrees' || row === 'oceaniaTrees') {
+      engine.camera.position.set(0, 11, z + 58);
+      engine.camera.lookAt(new Vector3(0, 3.5, z));
+    } else {
+      engine.camera.position.set(0, 13, z + 64);
+      engine.camera.lookAt(new Vector3(0, 9, z));
+    }
   }
   engine.onUpdate(() => {
     if (engine.camera.position.y < 0.6) engine.camera.position.y = 0.6;

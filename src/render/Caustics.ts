@@ -204,7 +204,9 @@ export function causticTint(wp: NV3, depthIn?: NF): NF {
   if (!ctx) throw new Error('caustic context not set');
   const { hf, bake } = ctx;
   const flow = hf.flow;
-  if (!flow) throw new Error('caustic context without hydrology');
+  if (!flow) {
+    return float(0);
+  }
   const depth = depthIn ?? causticDepth(wp);
 
   // bed point → surface entry point along the refracted sun ray
@@ -257,6 +259,9 @@ export function causticTint(wp: NV3, depthIn?: NF): NF {
 /** lit-graph triage variant: x = gated tint, y = gate product, z = raw pattern */
 export function causticTintParts(wp: NV3, depthIn?: NF): NV3 {
   if (!ctx) throw new Error('caustic context not set');
+  if (!ctx.hf.flow) {
+    return vec3(0);
+  }
   const depth = depthIn ?? causticDepth(wp);
   const sunDir = vec3(ctx.sunDir as unknown as NV3);
   const gates = smoothstep(0.025, 0.09, depth)

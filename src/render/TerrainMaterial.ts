@@ -32,6 +32,7 @@ import {
 } from 'three/tsl';
 import type { NF, NV2, NV3, NV4 } from '../gpu/TSLTypes';
 import { hash12 } from '../gpu/noise/NoiseTSL';
+import { BIOME_TEX_SCALE } from '../contracts/biome';
 import {
   PERIOD_FBM,
   PERIOD_RID,
@@ -44,7 +45,7 @@ import { LAKE_LEVEL, WORLD_HALF, WORLD_SIZE } from '../world/WorldConst';
 export interface TerrainShadingInputs {
   /** rgba16f: xyz world normal, w slope */
   normalTex: StorageTexture;
-  /** rgba8: biomeId/8, snow, vegDensity, rockExposure (LINEAR-filtered) */
+  /** rgba8: biomeId/16, snow, vegDensity, rockExposure (LINEAR-filtered) */
   biomeTex: StorageTexture;
   /** rgba16f at sim res: moisture, flowStrength, riverDepth, W */
   fieldsTex: StorageTexture;
@@ -60,6 +61,12 @@ export interface TerrainShadingInputs {
    * beyond the world edge.
    */
   baseNormalSlope?: NV4;
+  /**
+   * Chunk center in world meters. Height/biome textures only cover
+   * [offset ± WORLD_HALF]; without this, streamed tiles sample as if they
+   * were still at the origin and smear / vanish.
+   */
+  worldOffset?: { x: number; z: number };
 }
 
 export interface TerrainShading {
@@ -70,7 +77,8 @@ export interface TerrainShading {
   worldNormalNode: NV3;
 }
 
-const uvFromWorld = (p: NV2): NV2 => p.div(WORLD_SIZE).add(0.5);
+const uvFromWorld = (p: NV2, offset?: { x: number; z: number }): NV2 =>
+  p.sub(vec2(offset?.x ?? 0, offset?.z ?? 0)).div(WORLD_SIZE).add(0.5);
 
 /**
  * Micro-displacement constants — SHARED by the TerrainTiles vertex stage
@@ -99,8 +107,10 @@ export const DISP = {
 export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   const wp = positionWorld;
   const wxz = wp.xz;
-  const uv = uvFromWorld(wxz);
+  const off = inp.worldOffset ?? { x: 0, z: 0 };
+  const uv = uvFromWorld(wxz, off);
   const h = wp.y;
+  const localXZ = wxz.sub(vec2(off.x, off.z));
 
   // --- baked-noise helpers (uv = world / (scale · channel period)) -----------
   /** value noise [0,1] at world feature scale `s` m */
@@ -126,14 +136,14 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   const slope = ns.w.toVar();
   const bio = texture(inp.biomeTex, uv);
   const fields = texture(inp.fieldsTex, uv);
-  // Beyond the world edge the baked maps clamp to their last texel row and
+  // Beyond the chunk edge the baked maps clamp to their last texel row and
   // SMEAR it radially across the vista shell (pale streaks). Cross-fade to
   // procedural estimates outside the domain (far shell only).
   const outsideK = inp.far
     ? smoothstep(
         WORLD_HALF * 0.96,
         WORLD_HALF * 1.0,
-        wxz.abs().x.max(wxz.abs().y),
+        localXZ.abs().x.max(localXZ.abs().y),
       )
     : float(0);
   const snowProc = smoothstep(950, 1300, h.add(valS(620, 0.23, 0.57).mul(140)));
@@ -212,6 +222,24 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
     meso.mul(0.08).add(0.95),
   );
 
+  // biome-band weights (peak at integer biome ids decoded from bio.r)
+  const bioNorm = bio.r.mul(BIOME_TEX_SCALE);
+  const bandAt = (id: number): NF =>
+    smoothstep(id - 0.8, id - 0.1, bioNorm).mul(smoothstep(id + 0.8, id + 0.1, bioNorm));
+  const desertK = bandAt(6);
+  const jungleK = bandAt(7);
+  const swampK = bandAt(8);
+  const grasslandK = bandAt(9);
+
+  const sandCol = mix(vec3(0.68, 0.54, 0.36), vec3(0.82, 0.7, 0.48), macroA).mul(
+    meso.mul(0.18).add(0.88),
+  );
+  const jungleSoil = mix(vec3(0.09, 0.11, 0.05), vec3(0.14, 0.17, 0.07), meso);
+  const swampMud = mix(vec3(0.07, 0.065, 0.045), vec3(0.11, 0.1, 0.07), macroB);
+  const prairieCol = mix(vec3(0.12, 0.16, 0.05), vec3(0.2, 0.22, 0.08), macroA).mul(
+    meso.mul(0.2).add(0.85),
+  );
+
   // ---------- class weights ------------------------------------------------------
   const rockW = smoothstep(0.62, 1.15, slope).max(rockExposure.mul(0.85)).toVar();
   const screeW = smoothstep(0.42, 0.62, slope)
@@ -221,7 +249,9 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   const grassW = smoothstep(0.5, 0.22, slope)
     .mul(vegDensity)
     .mul(zm.tKarst.mul(0.5).oneMinus())
-    .mul(rockW.oneMinus());
+    .mul(rockW.oneMinus())
+    .mul(desertK.oneMinus())
+    .mul(smoothstep(0.38, 0.14, moisture));
   const forestW = vegDensity
     .mul(smoothstep(0.9, 0.45, slope))
     .mul(smoothstep(0.25, 0.6, moisture.add(zm.tKarst.mul(0.3))))
@@ -252,6 +282,10 @@ export function buildTerrainShading(inp: TerrainShadingInputs): TerrainShading {
   col = mix(col, gravel, riverW.mul(0.85).mul(pondK.oneMinus()));
   col = mix(col, vec3(0.055, 0.052, 0.038), pondK);
   col = mix(col, snowCol, snowW);
+  col = mix(col, sandCol, desertK.mul(rockW.oneMinus()).mul(snowW.oneMinus()));
+  col = mix(col, jungleSoil, jungleK.mul(0.55));
+  col = mix(col, swampMud, swampK.mul(0.65));
+  col = mix(col, prairieCol, grasslandK.mul(0.7).mul(rockW.oneMinus()));
   col = col.mul(macroTint.add(1));
 
   // feedback 2.8 (splat half): a real grass field is DIRECTIONAL — forward

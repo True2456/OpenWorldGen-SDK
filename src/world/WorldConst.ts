@@ -24,15 +24,24 @@ export const SUMMIT_MAX = 1620;
 /** far-shell vista ring: analytic terrain from WORLD_HALF out to FAR_RADIUS */
 export const FAR_RADIUS = 14000;
 
-/** biome ids (stored quantized in classification texture r-channel) */
+/** simulated calendar — one in-world day per SECONDS_PER_DAY of worldTime */
+export const SECONDS_PER_DAY = 120;
+export const DAYS_PER_YEAR = 365;
+export const YEAR_SECONDS = SECONDS_PER_DAY * DAYS_PER_YEAR;
+
+/** biome ids (stored quantized in classification texture r-channel as id/16) */
 export const enum Biome {
   Alpine = 0, // rock, scree, snow above treeline
   Subalpine = 1, // krummholz, sparse stunted conifers, heath
   Conifer = 2, // montane spruce/pine forest
   KarstForest = 3, // broadleaf forest among karst towers & ravines (refs 1–3)
-  Meadow = 4, // grassland with flowers
+  Meadow = 4, // grassland with flowers (alpine meadows)
   Wetland = 5, // lake margins, sedges, moisture-lovers
-  COUNT = 6,
+  Desert = 6, // arid sand, scrub, mesas
+  Jungle = 7, // dense broadleaf, high moisture
+  Swamp = 8, // standing water, cypress-like margins
+  Grassland = 9, // open rolling prairie
+  COUNT = 10,
 }
 
 export const BIOME_NAMES: readonly string[] = [
@@ -42,9 +51,13 @@ export const BIOME_NAMES: readonly string[] = [
   'karst-forest',
   'meadow',
   'wetland',
+  'desert',
+  'jungle',
+  'swamp',
+  'grassland',
 ];
 
-/** quality presets — smaller grids, never fewer systems */
+/** quality presets — smaller grids; veg caps scale via VegPerf.ts */
 export interface QualityConfig {
   heightRes: number;
   simRes: number;

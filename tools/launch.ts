@@ -21,6 +21,10 @@ interface LaunchRecipe {
  *    Full Chromium new-headless via channel:'chromium' yields an apple/metal-3 adapter.
  */
 const CANDIDATES: LaunchRecipe[] = [
+  // Prefer installed Chrome — bundled Playwright Chromium is often absent
+  // under Cursor's sandbox cache path on this machine.
+  { headless: true, channel: 'chrome', args: [] },
+  { headless: false, channel: 'chrome', args: [] },
   { headless: true, channel: 'chromium', args: [] },
   { headless: true, channel: 'chromium', args: ['--enable-unsafe-webgpu'] },
   { headless: false, args: [] },

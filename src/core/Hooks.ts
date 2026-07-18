@@ -59,10 +59,35 @@ export interface LaasHooks {
   /** terrain/water heights at (x, z) — walk mode + fly soft collision */
   groundProbe: ((x: number, z: number) => { ground: number; water: number }) | null;
   setTimeOfDay: ((t: number) => void) | null;
+  /** current season snapshot (terrain/world scenes) */
+  getSeason:
+    | (() => {
+        phase: number;
+        day: number;
+        label: string;
+        coldK: number;
+        growthK: number;
+      })
+    | null;
+  setSeasonPhase: ((phase: number) => void) | null;
   /** settle frames (TAA/temporal effects) then resolve — call before screenshots */
   settle: ((frames?: number) => Promise<void>) | null;
   /** enable/disable fly-camera input (flythrough takes the wheel) */
   flyCamEnabled: ((on: boolean) => void) | null;
+  /** when true, main leaves FlyCamera disabled (chase / cinematic scenes) */
+  disableFlyCam: boolean;
+  /** scene metadata for tooling */
+  profile?: string;
+  weather?: string | null;
+  seed?: number;
+  importId?: string | null;
+  /** digital twin mode */
+  world?: 'authored' | 'real';
+  stateId?: string | null;
+  tileId?: string | null;
+  regionId?: string | null;
+  wgs84?: { lat: number; lon: number } | null;
+  getWgs84?: (() => { lat: number; lon: number } | null) | null;
 }
 
 declare global {
@@ -85,8 +110,11 @@ export function initHooks(): LaasHooks {
     initialPoseMode: null,
     groundProbe: null,
     setTimeOfDay: null,
+    getSeason: null,
+    setSeasonPhase: null,
     settle: null,
     flyCamEnabled: null,
+    disableFlyCam: false,
   };
   window.__laas = hooks;
   return hooks;

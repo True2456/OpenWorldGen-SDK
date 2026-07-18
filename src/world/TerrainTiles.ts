@@ -68,6 +68,8 @@ export class TerrainTiles {
   private hf: Heightfield;
   private lastCamX = Infinity;
   private lastCamZ = Infinity;
+  private worldOriginX = 0;
+  private worldOriginZ = 0;
   activeTiles = 0;
   /** per-level height ranges: level 0 = 64×64 grid of 64 m cells, then halves */
   private rangePyr: Float32Array[] = [];
@@ -82,9 +84,17 @@ export class TerrainTiles {
       gi?: ProbeGI;
       /** canopy coverage map — attenuates probe ambient under tree crowns */
       canopyTex?: StorageTexture;
+      /** streamed chunk center in world meters (default origin) */
+      worldOrigin?: { x: number; z: number };
+      /** skip far vista shell for ring chunks */
+      skipFarShell?: boolean;
     } = {},
   ) {
     this.hf = hf;
+    if (opts.worldOrigin) {
+      this.worldOriginX = opts.worldOrigin.x;
+      this.worldOriginZ = opts.worldOrigin.z;
+    }
     this.buildRangePyramid();
     // ?ablate=mat → neutral clay (perf attribution for the splat material)
     const ablate = new Set(
@@ -147,7 +157,8 @@ export class TerrainTiles {
     // coincide across LODs. Veg sits on the UNDISPLACED field — amplitude
     // stays ≤9 cm where grass grows (blade sink hides it), full on bare
     // rock/scree; snow smooths it back out.
-    const uvV = wpos.div(WORLD_SIZE).add(0.5);
+    const worldOff = { x: this.worldOriginX, z: this.worldOriginZ };
+    const uvV = hf.uvFromWorld(wpos);
     const nsV = texture(hf.normalTex, uvV, 0);
     const bioV = hf.biomeTex ? texture(hf.biomeTex, uvV, 0) : vec4(0, 0, 0, 0);
     const fldV = hf.fieldsTex ? texture(hf.fieldsTex, uvV, 0) : vec4(0, 0, 0, 0);
@@ -196,6 +207,7 @@ export class TerrainTiles {
       noiseB: hf.noiseB as NonNullable<typeof hf.noiseB>,
       mp: hf.mp,
       far: false,
+      worldOffset: worldOff,
     });
     mat.colorNode = shading.colorNode;
     mat.normalNode = shading.normalNode;
@@ -244,7 +256,10 @@ export class TerrainTiles {
       let irr = opts.gi.irradiance(positionWorld, shading.worldNormalNode);
       if (opts.canopyTex && !ablate.has('canopy')) {
         irr = irr.mul(
-          canopyAt(opts.canopyTex, positionWorld.xz).mul(0.18).oneMinus(),
+        canopyAt(opts.canopyTex, positionWorld.xz, {
+          x: this.worldOriginX,
+          z: this.worldOriginZ,
+        }).mul(0.18).oneMinus(),
         ) as typeof irr;
       }
       (mat as unknown as { setupLightMap: () => unknown }).setupLightMap = () =>
@@ -292,7 +307,7 @@ export class TerrainTiles {
     }
     if ((debugView === 'snow' || debugView === 'bioR' || debugView === 'bioB') && hf.biomeTex) {
       // single-channel classification view: white = channel value
-      const b = texture(hf.biomeTex, positionWorld.xz.div(WORLD_SIZE).add(0.5));
+      const b = texture(hf.biomeTex, hf.uvFromWorld(positionWorld.xz));
       mat.colorNode = vec3(0.02);
       const ch = debugView === 'bioR' ? b.r : debugView === 'bioB' ? b.b : b.g;
       mat.emissiveNode = vec3(ch);
@@ -328,15 +343,20 @@ export class TerrainTiles {
     this.mesh.castShadow = false;
 
     // --- far shell -----------------------------------------------------------------
+    // Anchored at the chunk world origin so the viewport around a streamed
+    // chunk and its 4–14 km vista stay continuous (local RingGeometry alone
+    // only covers around world (0,0)).
     const ring = new RingGeometry(WORLD_HALF * 0.952, FAR_RADIUS, 160, 42);
     ring.rotateX(-Math.PI / 2);
     const farMat = new MeshPhysicalNodeMaterial();
     farMat.specularIntensity = 0.35;
-    const fxz = positionLocal.xz;
+    const farOrigin = vec2(this.worldOriginX, this.worldOriginZ);
+    const fxzLocal = positionLocal.xz;
+    const fxz = fxzLocal.add(farOrigin);
     const farMacro = macroTerrain(fxz, hf.mp, 'far');
     const baked = hf.sampleHeight(fxz);
     const edgeBlend = clamp(
-      fxz.abs().x.max(fxz.abs().y).sub(WORLD_HALF * 0.95).div(WORLD_HALF * 0.05),
+      fxzLocal.abs().x.max(fxzLocal.abs().y).sub(WORLD_HALF * 0.95).div(WORLD_HALF * 0.05),
       0,
       1,
     );
@@ -366,6 +386,7 @@ export class TerrainTiles {
       mp: hf.mp,
       far: true,
       baseNormalSlope: farNS,
+      worldOffset: { x: this.worldOriginX, z: this.worldOriginZ },
     });
     farMat.colorNode = farShading.colorNode;
     farMat.normalNode = farShading.normalNode;
@@ -379,6 +400,7 @@ export class TerrainTiles {
     this.farShell = new Mesh(ring, farMat);
     this.farShell.frustumCulled = false;
     this.farShell.receiveShadow = true;
+    if (opts.skipFarShell) this.farShell.visible = false;
   }
 
   /**
@@ -435,8 +457,8 @@ export class TerrainTiles {
     const lvl = Math.max(0, Math.min(Math.round(Math.log2(Math.max(size, MIN_TILE) / MIN_TILE)), this.rangePyr.length - 1));
     const side = 64 >> lvl;
     const cell = WORLD_SIZE / side;
-    const cx = Math.max(0, Math.min(Math.floor((ox + WORLD_SIZE / 2) / cell), side - 1));
-    const cy = Math.max(0, Math.min(Math.floor((oz + WORLD_SIZE / 2) / cell), side - 1));
+    const cx = Math.max(0, Math.min(Math.floor((ox - this.worldOriginX + WORLD_SIZE / 2) / cell), side - 1));
+    const cy = Math.max(0, Math.min(Math.floor((oz - this.worldOriginZ + WORLD_SIZE / 2) / cell), side - 1));
     return (this.rangePyr[lvl] as Float32Array)[cy * side + cx] as number;
   }
 
@@ -483,7 +505,7 @@ export class TerrainTiles {
         emit(ox, oz, size, lod);
       }
     };
-    recurse(0, 0, WORLD_SIZE, 0);
+    recurse(this.worldOriginX, this.worldOriginZ, WORLD_SIZE, 0);
 
     this.activeTiles = n;
     this.mesh.count = n;

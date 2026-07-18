@@ -27,6 +27,23 @@ export interface Bookmark {
   tod: number;
 }
 
+/**
+ * Per-profile default camera when no ?shot / ?alt / ?cam — composed showcase
+ * spawns so desert/jungle/swamp/grassland don't all open on the alpine valley.
+ * Alpine keeps the interactive walk spawn in TerrainScene.
+ */
+export const PROFILE_SPAWN: Partial<Record<string, Bookmark>> = {
+  desert: { name: 'Desert karst overlook', x: 900, z: 1200, alt: 45, yaw: 1.1, pitch: -0.14, tod: 16.5 },
+  jungle: { name: 'Jungle interior', x: -850, z: 850, alt: 6, yaw: -0.785, pitch: -0.08, tod: 12.5 },
+  swamp: { name: 'Swamp lakeshore', x: -1400, z: 1250, alt: 2.5, yaw: 3.14, pitch: -0.1, tod: 10 },
+  grassland: { name: 'Grassland meadow', x: -870, z: 862, alt: 1.8, yaw: -1.45, pitch: 0.02, tod: 14 },
+  oceania: { name: 'Eucalyptus ridgeline', x: 0, z: -200, alt: 24, yaw: 0.2, pitch: -0.12, tod: 16 },
+};
+
+export function profileSpawnBookmark(profile: string): Bookmark | undefined {
+  return PROFILE_SPAWN[profile];
+}
+
 /** nine composed viewpoints — verified framings from the phase shots */
 export const BOOKMARKS: Bookmark[] = [
   { name: 'Gorge stream (scene1)', x: 620, z: 650, alt: 1.3, yaw: 0.5, pitch: -0.12, tod: 12.5 },
@@ -40,7 +57,7 @@ export const BOOKMARKS: Bookmark[] = [
   { name: 'Valley network aerial', x: -600, z: 700, alt: 260, yaw: -0.6, pitch: -0.5, tod: 17.5 },
 ];
 
-function poseY(hf: Heightfield, b: Bookmark): number {
+export function bookmarkPoseY(hf: Heightfield, b: Bookmark): number {
   const ground = hf.heightAtCpu(b.x, b.z) + b.alt;
   const water = hf.waterYAtCpu(b.x, b.z) + 0.6;
   return Math.max(ground, water);
@@ -55,7 +72,7 @@ export function installBookmarks(
   const apply = (i: number): void => {
     const b = BOOKMARKS[i];
     if (!b) return;
-    hooks.setPose?.({ p: [b.x, poseY(hf, b), b.z], yaw: b.yaw, pitch: b.pitch });
+    hooks.setPose?.({ p: [b.x, bookmarkPoseY(hf, b), b.z], yaw: b.yaw, pitch: b.pitch });
     hooks.setTimeOfDay?.(b.tod);
   };
 
@@ -93,7 +110,7 @@ export function installBookmarks(
       hooks.flyCamEnabled?.(!this.active);
       if (this.active && !this.curve) {
         this.curve = new CatmullRomCurve3(
-          TOUR.map((w) => new Vector3(w.x, poseY(hf, { ...w, tod: 0, name: '' } as Bookmark), w.z)),
+          TOUR.map((w) => new Vector3(w.x, bookmarkPoseY(hf, { ...w, tod: 0, name: '' } as Bookmark), w.z)),
           false,
           'centripetal',
           0.5,
@@ -131,7 +148,7 @@ export function installBookmarks(
   if (params.shot !== null && params.cam === null) {
     const b = BOOKMARKS[params.shot - 1];
     if (b) {
-      hooks.initialPose = { p: [b.x, poseY(hf, b), b.z], yaw: b.yaw, pitch: b.pitch };
+      hooks.initialPose = { p: [b.x, bookmarkPoseY(hf, b), b.z], yaw: b.yaw, pitch: b.pitch };
     }
   }
 }
