@@ -1,12 +1,26 @@
 import * as THREE from 'three';
-import { MeshBasicNodeMaterial } from 'three/webgpu';
-import { cameraPosition, float, normalWorld, positionWorld, vec3, vec4 } from 'three/tsl';
+import { MeshBasicNodeMaterial, MeshStandardNodeMaterial } from 'three/webgpu';
+import {
+  cameraPosition,
+  float,
+  normalWorld,
+  positionWorld,
+  vec3,
+  vec4,
+  time,
+  mix,
+  smoothstep,
+  normalLocal,
+  transformNormalToView,
+  positionLocal
+} from 'three/tsl';
 import type { WorldContext } from './Scenes';
 import { buildVegLibrary } from '../vegetation/VegLibrary';
 import { VegClass } from '../gpu/passes/Scatter';
+import { fbm3 } from '../gpu/noise/NoiseTSL';
 
 // ----------------------------------------------------------------------------
-// 3D Perlin Noise Implementation
+// 3D Perlin Noise Implementation (CPU side for deformation + asset scattering)
 // ----------------------------------------------------------------------------
 class PerlinNoise {
   private p: number[] = new Array(512);
@@ -97,11 +111,31 @@ class PerlinNoise {
     for (let i = 0; i < octaves; i++) {
       value += this.noise(x * frequency, y * frequency, z * frequency) * amplitude;
       maxValue += amplitude;
+      amplitude *= 0.5;
       frequency *= 2.0;
     }
     return value / maxValue;
   }
 }
+
+// ----------------------------------------------------------------------------
+// Custom Atmosphere Shader (Fresnel Limb Glow in TSL)
+// ----------------------------------------------------------------------------
+const buildAtmosphereMaterial = (color: THREE.Color) => {
+  const viewDir = cameraPosition.sub(positionWorld).normalize();
+  const dVal = normalWorld.dot(viewDir).clamp(0, 1);
+  const intensity = float(1.0).sub(dVal).pow(4.0); // Soft Fresnel limb glow
+
+  const glowNode = vec4(vec3(color.r, color.g, color.b), intensity.mul(0.88));
+
+  return new MeshBasicNodeMaterial({
+    colorNode: glowNode,
+    blending: THREE.AdditiveBlending,
+    side: THREE.BackSide,
+    transparent: true,
+    depthWrite: false
+  });
+};
 
 // ----------------------------------------------------------------------------
 // Scene Builder
@@ -224,11 +258,11 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
       allowedTrees: [VegClass.Beech, VegClass.Birch, VegClass.Oak],
       allowedFoliage: [VegClass.Fern, VegClass.FlowerUmbel, VegClass.FlowerDaisy],
       colors: {
-        oceanBed: new THREE.Color(0x0e1814),
-        beach: new THREE.Color(0xded6a9),
-        grass: new THREE.Color(0x3c783c),
-        rock: new THREE.Color(0x5a5f5a),
-        snow: new THREE.Color(0xf0f0f5),
+        oceanBed: new THREE.Color(0x0a120d),
+        beach: new THREE.Color(0xdad0a5),
+        grass: new THREE.Color(0x326e32),
+        rock: new THREE.Color(0x565c56),
+        snow: new THREE.Color(0xf5f5fa),
         water: new THREE.Color(0x194b75),
         atmosphere: new THREE.Color(0x4ca3e0)
       }
@@ -243,13 +277,13 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
       allowedTrees: [VegClass.Joshua, VegClass.Acacia, VegClass.Mesquite],
       allowedFoliage: [VegClass.DryGrassTuft, VegClass.Creosote],
       colors: {
-        oceanBed: new THREE.Color(0x351b0f),
-        beach: new THREE.Color(0xebb373),
-        grass: new THREE.Color(0xcc8139),
-        rock: new THREE.Color(0x943d24),
-        snow: new THREE.Color(0xe0cdb4),
-        water: new THREE.Color(0x7c3f1e),
-        atmosphere: new THREE.Color(0xe08f5c)
+        oceanBed: new THREE.Color(0x2d170b),
+        beach: new THREE.Color(0xe6aa68),
+        grass: new THREE.Color(0xc27732),
+        rock: new THREE.Color(0x8a331c),
+        snow: new THREE.Color(0xdfcbb0),
+        water: new THREE.Color(0x753a1a),
+        atmosphere: new THREE.Color(0xd98452)
       }
     },
     {
@@ -262,13 +296,13 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
       allowedTrees: [VegClass.Spruce, VegClass.Pine, VegClass.Willow],
       allowedFoliage: [VegClass.Fern, VegClass.SwampReed],
       colors: {
-        oceanBed: new THREE.Color(0x0b1724),
-        beach: new THREE.Color(0xa3d1db),
-        grass: new THREE.Color(0x427674),
-        rock: new THREE.Color(0x445866),
+        oceanBed: new THREE.Color(0x09141f),
+        beach: new THREE.Color(0x99cbda),
+        grass: new THREE.Color(0x3b6e6c),
+        rock: new THREE.Color(0x3e5260),
         snow: new THREE.Color(0xffffff),
-        water: new THREE.Color(0x358e9e),
-        atmosphere: new THREE.Color(0x73d3e6)
+        water: new THREE.Color(0x318796),
+        atmosphere: new THREE.Color(0x6dd0e6)
       }
     }
   ];
@@ -279,10 +313,8 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
   const deformSphere = (pConfig: typeof planetsConfig[number], detail: number) => {
     const geo = new THREE.SphereGeometry(pConfig.radius, detail, detail);
     const posAttr = geo.attributes.position;
-    const vertexColors = new Float32Array(posAttr.count * 3);
     const localPos = new THREE.Vector3();
     const radial = new THREE.Vector3();
-    const n = new THREE.Vector3();
 
     for (let i = 0; i < posAttr.count; i++) {
       localPos.fromBufferAttribute(posAttr, i);
@@ -301,34 +333,6 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     }
 
     geo.computeVertexNormals();
-    const normAttr = geo.attributes.normal;
-
-    for (let i = 0; i < posAttr.count; i++) {
-      localPos.fromBufferAttribute(posAttr, i);
-      n.fromBufferAttribute(normAttr, i);
-      radial.copy(localPos).normalize();
-
-      const height = localPos.length() - pConfig.radius;
-      const slope = 1.0 - n.dot(radial);
-
-      let color = pConfig.colors.grass;
-
-      if (height < 1.5) {
-        color = pConfig.colors.oceanBed;
-      } else if (height < pConfig.scale * 0.12) {
-        color = pConfig.colors.beach;
-      } else if (slope > 0.28) {
-        color = pConfig.colors.rock;
-      } else if (height > pConfig.scale * 0.55) {
-        color = pConfig.colors.snow;
-      }
-
-      vertexColors[i * 3] = color.r;
-      vertexColors[i * 3 + 1] = color.g;
-      vertexColors[i * 3 + 2] = color.b;
-    }
-
-    geo.setAttribute('color', new THREE.BufferAttribute(vertexColors, 3));
     return geo;
   };
 
@@ -341,10 +345,47 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     const geoMed = deformSphere(pConfig, 64);   // LOD 1 (Medium)
     const geoLow = deformSphere(pConfig, 24);   // LOD 2 (Low)
 
-    const planetMat = new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      roughness: 0.85,
-      metalness: 0.05
+    // B. Custom TSL Node Material for Planet Terrain Shading (pixel-perfect blending + bump map)
+    const height = positionLocal.length().sub(pConfig.radius);
+    const radialDir = positionLocal.normalize();
+    
+    // 1. Procedural normal mapping/bumpiness (adds craggy rock texture details)
+    const worldPos = positionLocal.add(vec3(pConfig.center.x, pConfig.center.y, pConfig.center.z));
+    const bumpNoise = fbm3(worldPos.mul(0.04), 3); // High frequency noise
+    const perturbedNormal = normalLocal.add(bumpNoise.mul(0.12)).normalize();
+    const viewSpaceNormal = transformNormalToView(perturbedNormal);
+
+    const slope = float(1.0).sub(perturbedNormal.dot(radialDir)).clamp(0, 1);
+
+    // Color definitions in TSL
+    const oceanBedColor = vec3(pConfig.colors.oceanBed.r, pConfig.colors.oceanBed.g, pConfig.colors.oceanBed.b);
+    const beachColor = vec3(pConfig.colors.beach.r, pConfig.colors.beach.g, pConfig.colors.beach.b);
+    const grassColor = vec3(pConfig.colors.grass.r, pConfig.colors.grass.g, pConfig.colors.grass.b);
+    const rockColor = vec3(pConfig.colors.rock.r, pConfig.colors.rock.g, pConfig.colors.rock.b);
+    const snowColor = vec3(pConfig.colors.snow.r, pConfig.colors.snow.g, pConfig.colors.snow.b);
+
+    // 2. Pixel-perfect color blending
+    // Blend beach sand and grass vegetation
+    const tBeach = smoothstep(float(0.0), float(pConfig.scale * 0.12), height);
+    let baseColor = mix(beachColor, grassColor, tBeach);
+
+    // Blend rocky textures on steep slopes
+    const tSlope = smoothstep(float(0.20), float(0.35), slope);
+    baseColor = mix(baseColor, rockColor, tSlope);
+
+    // Blend white snow caps on high altitude peaks
+    const tSnow = smoothstep(float(pConfig.scale * 0.50), float(pConfig.scale * 0.65), height);
+    baseColor = mix(baseColor, snowColor, tSnow);
+
+    // Blend ocean bed mud under the water line
+    const tOcean = smoothstep(float(-5.0), float(1.0), height);
+    const terrainAlbedo = mix(oceanBedColor, baseColor, tOcean);
+
+    const planetMat = new MeshStandardNodeMaterial({
+      colorNode: terrainAlbedo,
+      normalNode: viewSpaceNormal,
+      roughness: 0.88,
+      metalness: 0.04
     });
 
     const meshHigh = new THREE.Mesh(geoHigh, planetMat);
@@ -365,45 +406,56 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     lod.position.copy(pConfig.center);
     scene.add(lod);
 
-    // B. Custom Atmosphere Fresnel Glow Shader via native TSL nodes
+    // C. Atmosphere Fresnel glow shell
+    const atmosphereMat = buildAtmosphereMaterial(pConfig.colors.atmosphere);
     const atmosphereGeo = new THREE.SphereGeometry(pConfig.radius * 1.08, 48, 48);
-    const viewDir = cameraPosition.sub(positionWorld).normalize();
-    const dVal = normalWorld.dot(viewDir).clamp(0, 1);
-    const intensity = float(1.0).sub(dVal).pow(4.0); // Fresnel power
-    
-    const glowNode = vec4(vec3(pConfig.colors.atmosphere.r, pConfig.colors.atmosphere.g, pConfig.colors.atmosphere.b), intensity.mul(0.85)); // Fresnel power
-
-    const atmosphereMat = new MeshBasicNodeMaterial({
-      colorNode: glowNode,
-      blending: THREE.AdditiveBlending,
-      side: THREE.BackSide,
-      transparent: true,
-      depthWrite: false
-    });
-
     const atmosphereMesh = new THREE.Mesh(atmosphereGeo, atmosphereMat);
     atmosphereMesh.position.copy(pConfig.center);
     scene.add(atmosphereMesh);
 
-    // C. Ocean sphere
+    // D. Upgraded Ocean Water Material (depth-based opacity + animated wave normals)
+    // 1. Animated wave normals in view space
+    const waveTime = time.mul(0.14);
+    const wavePos = positionLocal.mul(0.08).add(vec3(waveTime, 0, waveTime.mul(0.5)));
+    const waveNoise = fbm3(wavePos, 2);
+    const waterNormal = normalLocal.add(waveNoise.mul(0.08)).normalize();
+    const waterViewNormal = transformNormalToView(waterNormal);
+
+    // 2. Depth calculation
+    const normDir = positionLocal.normalize();
+    const noisePos = normDir.mul(pConfig.radius).add(vec3(pConfig.center.x, pConfig.center.y, pConfig.center.z));
+    const landHeight = fbm3(noisePos.mul(pConfig.freq), 3).mul(pConfig.scale);
+    
+    // Water depth above deformed land surface
+    const depth = float(pConfig.radius + 1.0).sub(float(pConfig.radius).add(landHeight));
+
+    // Deep water color fade (shallow teal/cyan -> deep dark ocean blue)
+    const shallowWater = vec3(pConfig.colors.water.r, pConfig.colors.water.g, pConfig.colors.water.b);
+    const deepWater = vec3(0.03, 0.09, 0.22); // Deep dark navy blue
+    const waterAlbedo = mix(shallowWater, deepWater, smoothstep(float(0.0), float(30.0), depth));
+
+    // Opacity fade (shallow margins are transparent, deep margins are opaque)
+    const waterOpacity = smoothstep(float(0.0), float(25.0), depth).mul(0.68).add(0.22);
+    const waterColorNode = vec4(waterAlbedo, waterOpacity);
+
     const waterGeo = new THREE.SphereGeometry(pConfig.radius + 1.0, 64, 64);
-    const waterMat = new THREE.MeshStandardMaterial({
-      color: pConfig.colors.water,
-      transparent: true,
-      opacity: 0.65,
-      roughness: 0.15,
-      metalness: 0.1
+    const waterMat = new MeshStandardNodeMaterial({
+      colorNode: waterColorNode,
+      normalNode: waterViewNormal,
+      roughness: 0.12, // Highly shiny, catches sun glare
+      metalness: 0.1,
+      transparent: true
     });
+    
     const waterMesh = new THREE.Mesh(waterGeo, waterMat);
     waterMesh.position.copy(pConfig.center);
     scene.add(waterMesh);
 
-    // D. Procedural Asset Placement
+    // E. Procedural Asset Placement
     const assetGroup = createPlanetAssetGroup(pConfig.center, 3000);
     const rng = seed.rng(`planet-scatter-${pIdx}`);
 
-    // Generate vegetation instances on the deformed high-resolution surface
-    const sampleCount = 1200; // Increased to cover larger radius
+    const sampleCount = 1200;
     const instMatrix = new THREE.Matrix4();
     const instPos = new THREE.Vector3();
     const instQuat = new THREE.Quaternion();
@@ -420,7 +472,7 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
       const ry = Math.sin(phi) * Math.sin(theta);
       const rz = Math.cos(phi);
 
-      const normDir = new THREE.Vector3(rx, ry, rz);
+      const sNormDir = new THREE.Vector3(rx, ry, rz);
 
       const ptNoise = noiseGen.fbm(
         (rx * pConfig.radius + pConfig.center.x) * pConfig.freq,
@@ -429,19 +481,17 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
         4
       );
 
-      const height = ptNoise * pConfig.scale;
+      const heightVal = ptNoise * pConfig.scale;
 
-      // Restrict vegetation placement to land (above water line, below snow caps)
-      if (height > pConfig.scale * 0.14 && height < pConfig.scale * 0.55) {
-        instPos.copy(normDir).multiplyScalar(pConfig.radius + height);
+      // Restrict vegetation placement to dry land areas
+      if (heightVal > pConfig.scale * 0.14 && heightVal < pConfig.scale * 0.55) {
+        instPos.copy(sNormDir).multiplyScalar(pConfig.radius + heightVal);
 
-        // Align rotation with spherical normal
-        instQuat.setFromUnitVectors(alignY, normDir);
+        instQuat.setFromUnitVectors(alignY, sNormDir);
         const yawQ = new THREE.Quaternion();
-        yawQ.setFromAxisAngle(normDir, rng.float() * Math.PI * 2);
+        yawQ.setFromAxisAngle(sNormDir, rng.float() * Math.PI * 2);
         instQuat.premultiply(yawQ);
 
-        // Tree scaling (proportionate relative to planet radius)
         const sc = 0.55 + rng.float() * 0.45;
         instScale.set(sc, sc, sc);
 
@@ -475,7 +525,6 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     const camPos = engine.camera.position;
     planetAssets.forEach(planet => {
       const dist = camPos.distanceTo(planet.center);
-      // Completely hide asset meshes if the planet is far away
       const isVisible = dist < planet.radius * 3.5;
       planet.meshes.forEach(m => {
         m.visible = isVisible;
@@ -483,9 +532,9 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     });
   });
 
-  // 6. Initial camera pose (looking at first planet)
+  // 6. Initial camera pose
   ctx.hooks.initialPose = {
-    p: [0, 0, 2200], // Start 2200m away (properly scaled distance)
+    p: [0, 0, 2200],
     yaw: 0,
     pitch: 0
   };
