@@ -6,6 +6,32 @@ A fully procedural, extensible WebGPU open-world generator that runs entirely in
 
 ---
 
+## Screenshots — Verified Biome Profiles
+
+All screenshots below are unedited engine output, captured headlessly via Playwright + WebGPU on the same seed. Each profile is a distinct registered terrain configuration.
+
+| Alpine | Desert |
+|---|---|
+| ![Alpine — snow-capped ridges, spruce, meadow grass](docs/screenshots/alpine-seed1.png) | ![Desert — karst, oasis lake, sparse conifers](docs/screenshots/desert-seed1.png) |
+
+| Jungle | Grassland |
+|---|---|
+| ![Jungle — dense green canopy on rolling hills](docs/screenshots/jungle-seed1.png) | ![Grassland — open plains, distant snow peaks](docs/screenshots/grassland-seed1.png) |
+
+| Swamp — lakeside with water surface, rocky shore, snowline |
+|---|
+| ![Swamp](docs/screenshots/swamp-seed1.png) |
+
+### Headless Asset Verification (Playwright + WebGPU)
+
+The tooling boots the world headlessly and visually verifies every registered asset renders correctly:
+
+| All asset types (trees, rocks, flowers, foliage) | Procedural animals (giraffe, oryx, springbok…) |
+|---|---|
+| ![Asset gallery verification — 120 fps](docs/screenshots/africa-plants-gate.png) | ![Animal gallery verification — 120 fps](docs/screenshots/animals-gate.png) |
+
+---
+
 ## What it generates
 
 - **Terrain** — 4096² heightfield with hydraulic + thermal erosion, flow-accumulation rivers, moisture-driven biome classification, CDLOD quadtree meshing up to 4 km range
