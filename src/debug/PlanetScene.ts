@@ -259,7 +259,8 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
       freq: 0.0018,
       biomes: ['lush'],
       allowedTrees: [VegClass.Beech, VegClass.Birch, VegClass.Oak],
-      allowedFoliage: [VegClass.Fern, VegClass.FlowerUmbel, VegClass.FlowerDaisy],
+      allowedFoliage: [VegClass.DryGrassTuft, VegClass.Fern, VegClass.FlowerUmbel, VegClass.FlowerDaisy],
+      allowedRocks: [VegClass.Boulder, VegClass.Log, VegClass.StoneL, VegClass.StoneM, VegClass.StoneS],
       colors: {
         oceanBed: new THREE.Color(0x0a120d),
         beach: new THREE.Color(0xdad0a5),
@@ -279,6 +280,7 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
       biomes: ['desert'],
       allowedTrees: [VegClass.Joshua, VegClass.Acacia, VegClass.Mesquite],
       allowedFoliage: [VegClass.DryGrassTuft, VegClass.Creosote],
+      allowedRocks: [VegClass.Boulder, VegClass.Slab, VegClass.StoneL, VegClass.StoneM],
       colors: {
         oceanBed: new THREE.Color(0x2d170b),
         beach: new THREE.Color(0xe6aa68),
@@ -298,6 +300,7 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
       biomes: ['frozen'],
       allowedTrees: [VegClass.Spruce, VegClass.Pine, VegClass.Willow],
       allowedFoliage: [VegClass.Fern, VegClass.SwampReed],
+      allowedRocks: [VegClass.Boulder, VegClass.StoneL, VegClass.StoneS],
       colors: {
         oceanBed: new THREE.Color(0x09141f),
         beach: new THREE.Color(0x99cbda),
@@ -352,19 +355,31 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     const height = positionLocal.length().sub(pConfig.radius);
     const radialDir = positionLocal.normalize();
     
-    // 1. Procedural normal mapping/bumpiness (adds craggy rock texture details)
+    // 1. Procedural normal mapping in tangent space (micro ripples + cracks)
     const worldPos = positionLocal.add(vec3(pConfig.center.x, pConfig.center.y, pConfig.center.z));
-    const bumpNoise = fbm3(worldPos.mul(0.04), 3); // High frequency noise
-    const perturbedNormal = normalLocal.add(bumpNoise.mul(0.12)).normalize();
-    const viewSpaceNormal = transformNormalToView(perturbedNormal);
+    
+    // Evaluate noise along tangent space dimensions using offset world coordinates
+    const nX = fbm3(worldPos.mul(0.75), 3);
+    const nY = fbm3(worldPos.add(vec3(100.0, 100.0, 100.0)).mul(0.75), 3);
+    const tangentNormal = vec3(nX.mul(0.35), nY.mul(0.35), 1.0).normalize();
 
-    const slope = float(1.0).sub(perturbedNormal.dot(radialDir)).clamp(0, 1);
+    // The slope is calculated using the smooth vertex normal (macro topography)
+    const slope = float(1.0).sub(normalLocal.dot(radialDir)).clamp(0, 1);
 
-    // Color definitions in TSL
+    // Color definitions in TSL with procedural albedo detail variations
+    const albedoNoise = fbm3(worldPos.mul(0.6), 3).clamp(0, 1); // repeats every ~1.6 meters for soil pattern variation
+
     const oceanBedColor = vec3(pConfig.colors.oceanBed.r, pConfig.colors.oceanBed.g, pConfig.colors.oceanBed.b);
-    const beachColor = vec3(pConfig.colors.beach.r, pConfig.colors.beach.g, pConfig.colors.beach.b);
-    const grassColor = vec3(pConfig.colors.grass.r, pConfig.colors.grass.g, pConfig.colors.grass.b);
-    const rockColor = vec3(pConfig.colors.rock.r, pConfig.colors.rock.g, pConfig.colors.rock.b);
+    
+    const beachBase = vec3(pConfig.colors.beach.r, pConfig.colors.beach.g, pConfig.colors.beach.b);
+    const beachColor = mix(beachBase, beachBase.mul(vec3(0.85, 0.82, 0.72)), albedoNoise); // darker/organic sand patches
+
+    const grassBase = vec3(pConfig.colors.grass.r, pConfig.colors.grass.g, pConfig.colors.grass.b);
+    const grassColor = mix(grassBase, grassBase.mul(vec3(0.55, 0.52, 0.32)), albedoNoise); // dark mossy/soil patches
+
+    const rockBase = vec3(pConfig.colors.rock.r, pConfig.colors.rock.g, pConfig.colors.rock.b);
+    const rockColor = mix(rockBase, rockBase.mul(vec3(1.25, 1.25, 1.30)), albedoNoise); // light mineral vein bands
+
     const snowColor = vec3(pConfig.colors.snow.r, pConfig.colors.snow.g, pConfig.colors.snow.b);
 
     // 2. Pixel-perfect color blending
@@ -386,7 +401,7 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
 
     const planetMat = new MeshStandardNodeMaterial({
       colorNode: terrainAlbedo,
-      normalNode: viewSpaceNormal,
+      normalNode: tangentNormal,
       roughness: 0.88,
       metalness: 0.04
     });
@@ -456,10 +471,10 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     scene.add(waterMesh);
 
     // E. Procedural Asset Placement
-    const assetGroup = createPlanetAssetGroup(pConfig.center, 3000);
+    const assetGroup = createPlanetAssetGroup(pConfig.center, 45000);
     const rng = seed.rng(`planet-scatter-${pIdx}`);
 
-    const sampleCount = 1200;
+    const sampleCount = 35000;
     const instMatrix = new THREE.Matrix4();
     const instPos = new THREE.Vector3();
     const instQuat = new THREE.Quaternion();
@@ -482,13 +497,13 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
         (rx * pConfig.radius + pConfig.center.x) * pConfig.freq,
         (ry * pConfig.radius + pConfig.center.y) * pConfig.freq,
         (rz * pConfig.radius + pConfig.center.z) * pConfig.freq,
-        4
+        2
       );
 
       const heightVal = ptNoise * pConfig.scale;
 
-      // Restrict vegetation placement to dry land areas
-      if (heightVal > pConfig.scale * 0.14 && heightVal < pConfig.scale * 0.55) {
+      // Restrict vegetation/rock placement to dry land areas and beaches
+      if (heightVal > -2.0 && heightVal < pConfig.scale * 0.60) {
         instPos.copy(sNormDir).multiplyScalar(pConfig.radius + heightVal);
 
         instQuat.setFromUnitVectors(alignY, sNormDir);
@@ -496,25 +511,45 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
         yawQ.setFromAxisAngle(sNormDir, rng.float() * Math.PI * 2);
         instQuat.premultiply(yawQ);
 
-        const sc = 0.55 + rng.float() * 0.45;
-        instScale.set(sc, sc, sc);
+        const roll = rng.float();
+        let cls = -1;
+        let variant = Math.floor(rng.float() * 4);
+        let sc = 1.0;
 
-        instMatrix.compose(instPos, instQuat, instScale);
+        if (roll < 0.25 && pConfig.allowedTrees.length > 0) {
+          // 25% Trees (spawn only on dry soil)
+          if (heightVal > pConfig.scale * 0.14 && heightVal < pConfig.scale * 0.55) {
+            cls = pConfig.allowedTrees[Math.floor(rng.float() * pConfig.allowedTrees.length)]!;
+            sc = 0.55 + rng.float() * 0.45;
+          }
+        } else if (roll < 0.80 && pConfig.allowedFoliage.length > 0) {
+          // 55% Grass / Foliage (spawn only above sandy beach level)
+          if (heightVal > pConfig.scale * 0.05 && heightVal < pConfig.scale * 0.55) {
+            cls = pConfig.allowedFoliage[Math.floor(rng.float() * pConfig.allowedFoliage.length)]!;
+            sc = 0.50 + rng.float() * 0.40;
+          }
+        } else if (pConfig.allowedRocks && pConfig.allowedRocks.length > 0) {
+          // 20% Rocks / Stones / Logs (can spawn on sandy beach and dry land)
+          cls = pConfig.allowedRocks[Math.floor(rng.float() * pConfig.allowedRocks.length)]!;
+          // Adjust stone scaling so pebbles/cobbles look realistic on the ground
+          if (cls === VegClass.StoneS) {
+            sc = 0.12 + rng.float() * 0.22;
+          } else if (cls === VegClass.StoneM) {
+            sc = 0.30 + rng.float() * 0.30;
+          } else {
+            sc = 0.40 + rng.float() * 0.60;
+          }
+        }
 
-        const isTree = rng.float() < 0.65;
-        if (isTree && pConfig.allowedTrees.length > 0) {
-          const cls = pConfig.allowedTrees[Math.floor(rng.float() * pConfig.allowedTrees.length)]!;
-          const variant = Math.floor(rng.float() * 4);
+        if (cls !== -1) {
+          instScale.set(sc, sc, sc);
+          instMatrix.compose(instPos, instQuat, instScale);
           assetGroup.addInstance(cls, variant, instMatrix);
-        } else if (pConfig.allowedFoliage.length > 0) {
-          const cls = pConfig.allowedFoliage[Math.floor(rng.float() * pConfig.allowedFoliage.length)]!;
-          const variant = Math.floor(rng.float() * 4);
-          assetGroup.addInstance(cls, variant, instMatrix);
+        }
       }
     }
-  }
 
-  // Place a guaranteed specimen tree at the North Pole of the Lush Planet for close-up surface screenshots
+    // Place a guaranteed specimen tree at the North Pole of the Lush Planet for close-up surface screenshots
     if (pIdx === 0) {
       const poleDir = new THREE.Vector3(0, 1, 0);
       const poleNoise = noiseGen.fbm(0, pConfig.freq * pConfig.radius, 0, 4);
@@ -526,6 +561,60 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
       const poleMatrix = new THREE.Matrix4().compose(polePos, poleQuat, poleScale);
 
       assetGroup.addInstance(VegClass.Beech, 0, poleMatrix);
+
+      // Local detail scattering around the North Pole landing zone (150 dense grass tufts, ferns, and pebbles)
+      const localRng = seed.rng(`lush-landing-zone`);
+      const localCount = 150;
+      
+      for (let i = 0; i < localCount; i++) {
+        const angle = localRng.float() * Math.PI * 2;
+        const rad = 2.0 + localRng.float() * 28.0; // 2m to 30m radius around the tree
+        
+        const rx = Math.sin(angle) * rad;
+        const rz = Math.cos(angle) * rad;
+        
+        // Project onto sphere surface near the pole
+        const sDir = new THREE.Vector3(rx, pConfig.radius, rz).normalize();
+        
+        const ptNoise = noiseGen.fbm(
+          (sDir.x * pConfig.radius + pConfig.center.x) * pConfig.freq,
+          (sDir.y * pConfig.radius + pConfig.center.y) * pConfig.freq,
+          (sDir.z * pConfig.radius + pConfig.center.z) * pConfig.freq,
+          2
+        );
+        const heightVal = ptNoise * pConfig.scale;
+        
+        const localPos = sDir.clone().multiplyScalar(pConfig.radius + heightVal);
+        const localQuat = new THREE.Quaternion().setFromUnitVectors(alignY, sDir);
+        const yawQ = new THREE.Quaternion().setFromAxisAngle(sDir, localRng.float() * Math.PI * 2);
+        localQuat.premultiply(yawQ);
+        
+        // 60% grass/foliage, 40% stones/pebbles
+        const isFoliage = localRng.float() < 0.60;
+        let cls = -1;
+        let sc = 1.0;
+        
+        if (isFoliage) {
+          const choices = [VegClass.DryGrassTuft, VegClass.Fern, VegClass.FlowerDaisy, VegClass.FlowerUmbel];
+          cls = choices[Math.floor(localRng.float() * choices.length)]!;
+          sc = 0.45 + localRng.float() * 0.40;
+        } else {
+          const choices = [VegClass.StoneS, VegClass.StoneM, VegClass.Boulder];
+          cls = choices[Math.floor(localRng.float() * choices.length)]!;
+          if (cls === VegClass.StoneS) {
+            sc = 0.12 + localRng.float() * 0.22;
+          } else if (cls === VegClass.StoneM) {
+            sc = 0.28 + localRng.float() * 0.28;
+          } else {
+            sc = 0.40 + localRng.float() * 0.50;
+          }
+        }
+        
+        const localScale = new THREE.Vector3(sc, sc, sc);
+        const localMatrix = new THREE.Matrix4().compose(localPos, localQuat, localScale);
+        assetGroup.addInstance(cls, Math.floor(localRng.float() * 4), localMatrix);
+      }
+
       console.log(`[laas] Lush North Pole surface Y = ${(pConfig.radius + poleHeight).toFixed(2)}`);
     }
 
