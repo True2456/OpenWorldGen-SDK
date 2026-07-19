@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
+import { cameraPosition, float, normalWorld, positionWorld, vec3, vec4 } from 'three/tsl';
 import type { WorldContext } from './Scenes';
 import { buildVegLibrary } from '../vegetation/VegLibrary';
 import { VegClass } from '../gpu/passes/Scatter';
@@ -86,6 +88,7 @@ class PerlinNoise {
     );
   }
 
+  // Fractional Brownian Motion
   fbm(x: number, y: number, z: number, octaves: number = 4): number {
     let value = 0;
     let amplitude = 1.0;
@@ -94,7 +97,6 @@ class PerlinNoise {
     for (let i = 0; i < octaves; i++) {
       value += this.noise(x * frequency, y * frequency, z * frequency) * amplitude;
       maxValue += amplitude;
-      amplitude *= 0.5;
       frequency *= 2.0;
     }
     return value / maxValue;
@@ -112,35 +114,33 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
   engine.renderer.setClearColor(0x010103, 1);
   
   // Starfield particle system
-  const starCount = 6000;
+  const starCount = 8000;
   const starGeometry = new THREE.BufferGeometry();
   const starPositions = new Float32Array(starCount * 3);
   const starColors = new Float32Array(starCount * 3);
 
   for (let i = 0; i < starCount; i++) {
-    // Distribute stars on a large sphere radius 3000
     const u = Math.random();
     const v = Math.random();
     const theta = u * 2.0 * Math.PI;
     const phi = Math.acos(2.0 * v - 1.0);
-    const r = 2500 + Math.random() * 1000;
+    const r = 12000 + Math.random() * 8000;
 
     starPositions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
     starPositions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
     starPositions[i * 3 + 2] = r * Math.cos(phi);
 
-    // Give stars slightly different white/yellow/blue temperatures
-    const c = 0.7 + Math.random() * 0.3;
+    const c = 0.65 + Math.random() * 0.35;
     starColors[i * 3] = c;
-    starColors[i * 3 + 1] = c + (Math.random() - 0.5) * 0.1;
-    starColors[i * 3 + 2] = c + Math.random() * 0.2;
+    starColors[i * 3 + 1] = c + (Math.random() - 0.5) * 0.08;
+    starColors[i * 3 + 2] = c + Math.random() * 0.18;
   }
 
   starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
   starGeometry.setAttribute('color', new THREE.BufferAttribute(starColors, 3));
 
   const starMaterial = new THREE.PointsMaterial({
-    size: 2.2,
+    size: 3.5,
     vertexColors: true,
     sizeAttenuation: true,
     transparent: true,
@@ -151,25 +151,32 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
   scene.add(stars);
 
   // 2. Lighting setup
-  const sunLight = new THREE.DirectionalLight(0xffffff, 1.6);
-  sunLight.position.set(1200, 1000, 800);
+  const sunLight = new THREE.DirectionalLight(0xffffff, 1.8);
+  sunLight.position.set(4000, 3000, 3000);
   scene.add(sunLight);
 
-  const ambientLight = new THREE.AmbientLight(0x0c0d12);
+  const ambientLight = new THREE.AmbientLight(0x0a0c10);
   scene.add(ambientLight);
 
   // 3. Build SDK vegetation library for geometry pools
   ctx.progress(0.1, 'Baking SDK vegetation models');
-  const vegLib = await buildVegLibrary(engine.renderer, seed, (p, m) => ctx.progress(0.1 + p * 0.4, m));
+  const vegLib = await buildVegLibrary(engine.renderer, seed, (p, m) => ctx.progress(0.1 + p * 0.3, m));
+
+  // Registry tracking for distance culling
+  const planetAssets: {
+    center: THREE.Vector3;
+    radius: number;
+    meshes: THREE.InstancedMesh[];
+  }[] = [];
 
   // Helper to create InstancedMeshes for a planet
-  const createPlanetAssetGroup = (planetCenter: THREE.Vector3, maxInstances: number = 3000) => {
+  const createPlanetAssetGroup = (planetCenter: THREE.Vector3, maxInstances: number = 4000) => {
     const group = new THREE.Group();
     group.position.copy(planetCenter);
     scene.add(group);
 
-    // Map to store InstancedMeshes by `class_variant_part`
     const instancedMeshes = new Map<string, { mesh: THREE.InstancedMesh, count: number }>();
+    const meshList: THREE.InstancedMesh[] = [];
 
     const addInstance = (cls: number, variant: number, matrix: THREE.Matrix4) => {
       const pool = vegLib.pools.find(p => p.cls === cls && p.variant === variant);
@@ -183,6 +190,7 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
           instMesh.castShadow = part.castShadow;
           instMesh.receiveShadow = true;
           group.add(instMesh);
+          meshList.push(instMesh);
           record = { mesh: instMesh, count: 0 };
           instancedMeshes.set(key, record);
         }
@@ -199,119 +207,113 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
       });
     };
 
-    return { addInstance, finalize };
+    return { addInstance, finalize, meshList };
   };
 
-  // 4. Planet generator configurations
+  // 4. Planet generator configurations (properly scaled to ~1000m)
   const noiseGen = new PerlinNoise(seed.seed);
   
   const planetsConfig = [
     {
       name: 'Lush Planet',
       center: new THREE.Vector3(0, 0, 0),
-      radius: 140,
-      scale: 24, // height scale
-      freq: 0.012,
+      radius: 1000,
+      scale: 120, // height scale (12% of radius)
+      freq: 0.0018,
       biomes: ['lush'],
       allowedTrees: [VegClass.Beech, VegClass.Birch, VegClass.Oak],
       allowedFoliage: [VegClass.Fern, VegClass.FlowerUmbel, VegClass.FlowerDaisy],
       colors: {
-        oceanBed: new THREE.Color(0x101b12),
-        beach: new THREE.Color(0xdad0a5),
-        grass: new THREE.Color(0x408040),
-        rock: new THREE.Color(0x606560),
+        oceanBed: new THREE.Color(0x0e1814),
+        beach: new THREE.Color(0xded6a9),
+        grass: new THREE.Color(0x3c783c),
+        rock: new THREE.Color(0x5a5f5a),
         snow: new THREE.Color(0xf0f0f5),
-        water: 0x1f5f8f
+        water: new THREE.Color(0x194b75),
+        atmosphere: new THREE.Color(0x4ca3e0)
       }
     },
     {
       name: 'Desert Outpost',
-      center: new THREE.Vector3(1000, 300, 700),
-      radius: 100,
-      scale: 18,
-      freq: 0.018,
+      center: new THREE.Vector3(6000, 1500, 5000),
+      radius: 800,
+      scale: 90,
+      freq: 0.0022,
       biomes: ['desert'],
       allowedTrees: [VegClass.Joshua, VegClass.Acacia, VegClass.Mesquite],
       allowedFoliage: [VegClass.DryGrassTuft, VegClass.Creosote],
       colors: {
-        oceanBed: new THREE.Color(0x3d2012),
-        beach: new THREE.Color(0xe6af6e),
-        grass: new THREE.Color(0xd28f46), // reddish/orange grasslands
-        rock: new THREE.Color(0x9a4b32), // red sandstone
-        snow: new THREE.Color(0xebdcc3),
-        water: 0x8a4b2a // dusty brackish water
+        oceanBed: new THREE.Color(0x351b0f),
+        beach: new THREE.Color(0xebb373),
+        grass: new THREE.Color(0xcc8139),
+        rock: new THREE.Color(0x943d24),
+        snow: new THREE.Color(0xe0cdb4),
+        water: new THREE.Color(0x7c3f1e),
+        atmosphere: new THREE.Color(0xe08f5c)
       }
     },
     {
       name: 'Frozen Tundra',
-      center: new THREE.Vector3(-800, -200, -800),
-      radius: 120,
-      scale: 22,
-      freq: 0.015,
+      center: new THREE.Vector3(-5000, -800, -6000),
+      radius: 900,
+      scale: 100,
+      freq: 0.0020,
       biomes: ['frozen'],
       allowedTrees: [VegClass.Spruce, VegClass.Pine, VegClass.Willow],
       allowedFoliage: [VegClass.Fern, VegClass.SwampReed],
       colors: {
-        oceanBed: new THREE.Color(0x0e1c29),
-        beach: new THREE.Color(0xaed7e0),
-        grass: new THREE.Color(0x487d7b), // icy cyan vegetation
-        rock: new THREE.Color(0x4a5d6a),
+        oceanBed: new THREE.Color(0x0b1724),
+        beach: new THREE.Color(0xa3d1db),
+        grass: new THREE.Color(0x427674),
+        rock: new THREE.Color(0x445866),
         snow: new THREE.Color(0xffffff),
-        water: 0x3f9faf
+        water: new THREE.Color(0x358e9e),
+        atmosphere: new THREE.Color(0x73d3e6)
       }
     }
   ];
 
-  ctx.progress(0.6, 'Generating space planets');
+  ctx.progress(0.5, 'Generating planets LOD models');
 
-  planetsConfig.forEach((pConfig, pIdx) => {
-    const detail = 80; // geometry segment detail (toned down for high perf)
-    const sphereGeo = new THREE.SphereGeometry(pConfig.radius, detail, detail);
-    
-    // Deform vertices on CPU
-    const posAttr = sphereGeo.attributes.position;
+  // Deform geometry CPU helper
+  const deformSphere = (pConfig: typeof planetsConfig[number], detail: number) => {
+    const geo = new THREE.SphereGeometry(pConfig.radius, detail, detail);
+    const posAttr = geo.attributes.position;
     const vertexColors = new Float32Array(posAttr.count * 3);
-    const localPositions: THREE.Vector3[] = [];
-
-    // Temporary variables for deformation and coloring
-    const v = new THREE.Vector3();
+    const localPos = new THREE.Vector3();
     const radial = new THREE.Vector3();
+    const n = new THREE.Vector3();
 
     for (let i = 0; i < posAttr.count; i++) {
-      v.fromBufferAttribute(posAttr, i);
-      radial.copy(v).normalize();
+      localPos.fromBufferAttribute(posAttr, i);
+      radial.copy(localPos).normalize();
 
-      // Read noise using absolute 3D position to deform
       const noiseVal = noiseGen.fbm(
-        (v.x + pConfig.center.x) * pConfig.freq,
-        (v.y + pConfig.center.y) * pConfig.freq,
-        (v.z + pConfig.center.z) * pConfig.freq,
+        (localPos.x + pConfig.center.x) * pConfig.freq,
+        (localPos.y + pConfig.center.y) * pConfig.freq,
+        (localPos.z + pConfig.center.z) * pConfig.freq,
         4
       );
 
-      // Height displacement
       const height = noiseVal * pConfig.scale;
-      v.addScaledVector(radial, height);
-      posAttr.setXYZ(i, v.x, v.y, v.z);
-      localPositions.push(v.clone());
+      localPos.addScaledVector(radial, height);
+      posAttr.setXYZ(i, localPos.x, localPos.y, localPos.z);
     }
 
-    sphereGeo.computeVertexNormals();
-    const normAttr = sphereGeo.attributes.normal;
+    geo.computeVertexNormals();
+    const normAttr = geo.attributes.normal;
 
-    // Apply vertex coloring based on height and slope
-    const n = new THREE.Vector3();
     for (let i = 0; i < posAttr.count; i++) {
-      v.copy(localPositions[i]!);
+      localPos.fromBufferAttribute(posAttr, i);
       n.fromBufferAttribute(normAttr, i);
-      radial.copy(v).normalize();
+      radial.copy(localPos).normalize();
 
-      const height = v.length() - pConfig.radius;
+      const height = localPos.length() - pConfig.radius;
       const slope = 1.0 - n.dot(radial);
 
       let color = pConfig.colors.grass;
 
-      if (height < 0.5) {
+      if (height < 1.5) {
         color = pConfig.colors.oceanBed;
       } else if (height < pConfig.scale * 0.12) {
         color = pConfig.colors.beach;
@@ -326,7 +328,18 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
       vertexColors[i * 3 + 2] = color.b;
     }
 
-    sphereGeo.setAttribute('color', new THREE.BufferAttribute(vertexColors, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(vertexColors, 3));
+    return geo;
+  };
+
+  planetsConfig.forEach((pConfig, pIdx) => {
+    // A. Create Three.js LOD geometry swapping
+    const lod = new THREE.LOD();
+    
+    // Deform geometries at different detail resolutions
+    const geoHigh = deformSphere(pConfig, 160); // LOD 0 (High)
+    const geoMed = deformSphere(pConfig, 64);   // LOD 1 (Medium)
+    const geoLow = deformSphere(pConfig, 24);   // LOD 2 (Low)
 
     const planetMat = new THREE.MeshStandardMaterial({
       vertexColors: true,
@@ -334,51 +347,70 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
       metalness: 0.05
     });
 
-    const planetMesh = new THREE.Mesh(sphereGeo, planetMat);
-    planetMesh.position.copy(pConfig.center);
-    planetMesh.castShadow = true;
-    planetMesh.receiveShadow = true;
-    scene.add(planetMesh);
+    const meshHigh = new THREE.Mesh(geoHigh, planetMat);
+    meshHigh.castShadow = true;
+    meshHigh.receiveShadow = true;
+    lod.addLevel(meshHigh, 0);
 
-    // Faint atmosphere glow shell
-    const glowGeo = new THREE.SphereGeometry(pConfig.radius * 1.06, 32, 32);
-    const glowMat = new THREE.MeshBasicMaterial({
-      color: pConfig.colors.water,
+    const meshMed = new THREE.Mesh(geoMed, planetMat);
+    meshMed.castShadow = true;
+    meshMed.receiveShadow = true;
+    lod.addLevel(meshMed, 1800);
+
+    const meshLow = new THREE.Mesh(geoLow, planetMat);
+    meshLow.castShadow = true;
+    meshLow.receiveShadow = true;
+    lod.addLevel(meshLow, 4000);
+
+    lod.position.copy(pConfig.center);
+    scene.add(lod);
+
+    // B. Custom Atmosphere Fresnel Glow Shader via native TSL nodes
+    const atmosphereGeo = new THREE.SphereGeometry(pConfig.radius * 1.08, 48, 48);
+    const viewDir = cameraPosition.sub(positionWorld).normalize();
+    const dVal = normalWorld.dot(viewDir).clamp(0, 1);
+    const intensity = float(1.0).sub(dVal).pow(4.0); // Fresnel power
+    
+    const glowNode = vec4(vec3(pConfig.colors.atmosphere.r, pConfig.colors.atmosphere.g, pConfig.colors.atmosphere.b), intensity.mul(0.85)); // Fresnel power
+
+    const atmosphereMat = new MeshBasicNodeMaterial({
+      colorNode: glowNode,
+      blending: THREE.AdditiveBlending,
+      side: THREE.BackSide,
       transparent: true,
-      opacity: 0.15,
-      side: THREE.BackSide
+      depthWrite: false
     });
-    const glowMesh = new THREE.Mesh(glowGeo, glowMat);
-    glowMesh.position.copy(pConfig.center);
-    scene.add(glowMesh);
 
-    // Ocean transparent sphere
-    const waterGeo = new THREE.SphereGeometry(pConfig.radius + 0.5, 64, 64);
+    const atmosphereMesh = new THREE.Mesh(atmosphereGeo, atmosphereMat);
+    atmosphereMesh.position.copy(pConfig.center);
+    scene.add(atmosphereMesh);
+
+    // C. Ocean sphere
+    const waterGeo = new THREE.SphereGeometry(pConfig.radius + 1.0, 64, 64);
     const waterMat = new THREE.MeshStandardMaterial({
       color: pConfig.colors.water,
       transparent: true,
       opacity: 0.65,
-      roughness: 0.2,
+      roughness: 0.15,
       metalness: 0.1
     });
     const waterMesh = new THREE.Mesh(waterGeo, waterMat);
     waterMesh.position.copy(pConfig.center);
     scene.add(waterMesh);
 
-    // Asset placement
-    const assetGroup = createPlanetAssetGroup(pConfig.center, 1200);
+    // D. Procedural Asset Placement
+    const assetGroup = createPlanetAssetGroup(pConfig.center, 3000);
     const rng = seed.rng(`planet-scatter-${pIdx}`);
 
-    const sampleCount = 450;
+    // Generate vegetation instances on the deformed high-resolution surface
+    const sampleCount = 1200; // Increased to cover larger radius
     const instMatrix = new THREE.Matrix4();
     const instPos = new THREE.Vector3();
     const instQuat = new THREE.Quaternion();
     const instScale = new THREE.Vector3();
-
     const alignY = new THREE.Vector3(0, 1, 0);
 
     for (let sIdx = 0; sIdx < sampleCount; sIdx++) {
-      // Pick a random point on unit sphere
       const u = rng.float();
       const wVal = rng.float();
       const theta = u * 2.0 * Math.PI;
@@ -390,7 +422,6 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
 
       const normDir = new THREE.Vector3(rx, ry, rz);
 
-      // Noise height at this point
       const ptNoise = noiseGen.fbm(
         (rx * pConfig.radius + pConfig.center.x) * pConfig.freq,
         (ry * pConfig.radius + pConfig.center.y) * pConfig.freq,
@@ -400,26 +431,22 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
 
       const height = ptNoise * pConfig.scale;
 
-      // Only place assets on dry land (above ocean level)
-      if (height > pConfig.scale * 0.15 && height < pConfig.scale * 0.55) {
-        // Compute position on deformed sphere surface
+      // Restrict vegetation placement to land (above water line, below snow caps)
+      if (height > pConfig.scale * 0.14 && height < pConfig.scale * 0.55) {
         instPos.copy(normDir).multiplyScalar(pConfig.radius + height);
 
-        // Align asset rotation with the spherical normal
+        // Align rotation with spherical normal
         instQuat.setFromUnitVectors(alignY, normDir);
-
-        // Add random yaw rotation around its local normal axis
         const yawQ = new THREE.Quaternion();
         yawQ.setFromAxisAngle(normDir, rng.float() * Math.PI * 2);
         instQuat.premultiply(yawQ);
 
-        // Random scaling
-        const sc = 0.6 + rng.float() * 0.5;
+        // Tree scaling (proportionate relative to planet radius)
+        const sc = 0.55 + rng.float() * 0.45;
         instScale.set(sc, sc, sc);
 
         instMatrix.compose(instPos, instQuat, instScale);
 
-        // Choose between tree or rock
         const isTree = rng.float() < 0.65;
         if (isTree && pConfig.allowedTrees.length > 0) {
           const cls = pConfig.allowedTrees[Math.floor(rng.float() * pConfig.allowedTrees.length)]!;
@@ -434,20 +461,39 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     }
 
     assetGroup.finalize();
+
+    // Register meshes for distance culling
+    planetAssets.push({
+      center: pConfig.center,
+      radius: pConfig.radius,
+      meshes: assetGroup.meshList
+    });
   });
 
+  // 5. Distance Culling Hook Loop
+  engine.onUpdate(() => {
+    const camPos = engine.camera.position;
+    planetAssets.forEach(planet => {
+      const dist = camPos.distanceTo(planet.center);
+      // Completely hide asset meshes if the planet is far away
+      const isVisible = dist < planet.radius * 3.5;
+      planet.meshes.forEach(m => {
+        m.visible = isVisible;
+      });
+    });
+  });
+
+  // 6. Initial camera pose (looking at first planet)
   ctx.hooks.initialPose = {
-    p: [0, 0, 320],
+    p: [0, 0, 2200], // Start 2200m away (properly scaled distance)
     yaw: 0,
     pitch: 0
   };
   ctx.hooks.initialPoseMode = 'fly';
 
-  // Explicitly configure fly mode
   ctx.hooks.disableFlyCam = false;
   ctx.hooks.flyCamEnabled?.(true);
 
-  // F3 HUD status hooks
   ctx.hooks.getSeason = () => ({
     label: 'Space',
     day: 0,
