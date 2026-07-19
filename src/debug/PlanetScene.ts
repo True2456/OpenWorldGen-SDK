@@ -187,7 +187,23 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
   // 2. Lighting setup
   const sunLight = new THREE.DirectionalLight(0xffffff, 1.8);
   sunLight.position.set(4000, 3000, 3000);
+  
+  // Configure Directional Shadow Mapping (2K maps, tightly focused around the active camera area)
+  sunLight.castShadow = true;
+  sunLight.shadow.mapSize.width = 2048;
+  sunLight.shadow.mapSize.height = 2048;
+  sunLight.shadow.camera.near = 10;
+  sunLight.shadow.camera.far = 4000;
+  
+  const shadowFrustumSize = 250;
+  sunLight.shadow.camera.left = -shadowFrustumSize;
+  sunLight.shadow.camera.right = shadowFrustumSize;
+  sunLight.shadow.camera.top = shadowFrustumSize;
+  sunLight.shadow.camera.bottom = -shadowFrustumSize;
+  sunLight.shadow.bias = -0.0008;
+
   scene.add(sunLight);
+  scene.add(sunLight.target);
 
   const ambientLight = new THREE.AmbientLight(0x0a0c10);
   scene.add(ambientLight);
@@ -399,10 +415,12 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     const tOcean = smoothstep(float(-5.0), float(1.0), height);
     const terrainAlbedo = mix(oceanBedColor, baseColor, tOcean);
 
+    const roughnessNode = mix(float(0.90), float(0.55), albedoNoise);
+
     const planetMat = new MeshStandardNodeMaterial({
       colorNode: terrainAlbedo,
       normalNode: tangentNormal,
-      roughness: 0.88,
+      roughnessNode: roughnessNode,
       metalness: 0.04
     });
 
@@ -471,10 +489,10 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     scene.add(waterMesh);
 
     // E. Procedural Asset Placement
-    const assetGroup = createPlanetAssetGroup(pConfig.center, 45000);
+    const assetGroup = createPlanetAssetGroup(pConfig.center, 25000);
     const rng = seed.rng(`planet-scatter-${pIdx}`);
 
-    const sampleCount = 35000;
+    const sampleCount = 15000;
     const instMatrix = new THREE.Matrix4();
     const instPos = new THREE.Vector3();
     const instQuat = new THREE.Quaternion();
@@ -646,6 +664,52 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     planetLODs.forEach(lod => {
       lod.update(cam);
     });
+
+    // C. Dynamic atmosphere sky clear color & ground fog entry (No Man's Sky transition)
+    let closestPlanet: any = null;
+    let minDist = Infinity;
+
+    planetsConfig.forEach(pConfig => {
+      const dist = camPos.distanceTo(pConfig.center);
+      if (dist < minDist) {
+        minDist = dist;
+        closestPlanet = pConfig;
+      }
+    });
+
+    const spaceClearColor = new THREE.Color(0x010103);
+
+    if (closestPlanet && minDist < closestPlanet.radius * 1.6) {
+      const radius = closestPlanet.radius;
+      const atmosphereLimit = radius * 1.6;
+      // Interpolate: t = 0 on surface (radius), t = 1 in space (atmosphereLimit)
+      const t = Math.max(0, Math.min(1, (minDist - radius) / (atmosphereLimit - radius)));
+
+      // Interpolate clear color from space black to atmosphere glow tone
+      const pAtmColor = closestPlanet.colors.atmosphere;
+      const skyColor = spaceClearColor.clone().lerp(pAtmColor, 1 - t);
+      engine.renderer.setClearColor(skyColor, 1);
+
+      // Starfield opacity: stars fade out completely as we reach the ground
+      starMaterial.opacity = t * 0.85;
+
+      // Exponential ground fog (thick on surface, fades out in space)
+      const density = (1 - t) * 0.0028;
+      if (density > 0.0001) {
+        scene.fog = new THREE.FogExp2(skyColor, density);
+      } else {
+        scene.fog = null;
+      }
+    } else {
+      // Out in deep space: black sky, full stars, no fog
+      engine.renderer.setClearColor(spaceClearColor, 1);
+      starMaterial.opacity = 0.85;
+      scene.fog = null;
+    }
+
+    // D. Update shadow camera target and position to track the player camera (for local, high-res shadows)
+    sunLight.target.position.copy(camPos);
+    sunLight.position.set(camPos.x + 1800, camPos.y + 1500, camPos.z + 1500);
   });
 
   // 6. Initial camera pose
