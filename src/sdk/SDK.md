@@ -1,6 +1,6 @@
-# LAAS Virtual World Creator SDK
+# OpenWorldGen Virtual World Creator SDK
 
-Welcome to the LAAS Virtual World Creator SDK! This SDK allows developers and AI agents to programmatically generate high-quality WebGPU-based 3D virtual worlds with custom terrains, trees, foliage, and rocks.
+Welcome to the OpenWorldGen Virtual World Creator SDK! This SDK allows developers and AI agents to programmatically generate high-quality WebGPU-based 3D virtual worlds with custom terrains, trees, foliage, and rocks.
 
 The SDK uses a **dynamic registry-based architecture**. All components, from shaders to pool builders, dynamically query these registries. This makes the system easily expandable.
 
@@ -25,7 +25,7 @@ Terrain profiles configure the base noise scales, mountain ridge/hill amplitudes
 To add a new terrain profile, register it with the `TerrainRegistry`:
 
 ```ts
-import { TerrainRegistry } from 'laas-world-sdk';
+import { TerrainRegistry } from 'openworld-sdk';
 import { Biome } from '../world/WorldConst';
 
 TerrainRegistry.register({
@@ -60,7 +60,7 @@ A tree species defines the parameters for the procedural branching grammar (Skel
 To add a new tree species, register it with the `VegetationRegistry`:
 
 ```ts
-import { VegetationRegistry } from 'laas-world-sdk';
+import { VegetationRegistry } from 'openworld-sdk';
 
 VegetationRegistry.registerTree({
   id: 'golden-birch',
@@ -124,7 +124,7 @@ Understory plants can be shrubs (multi-stem meshes) or bespoke custom geometries
 To add a new understory species:
 
 ```ts
-import { VegetationRegistry, VegClass } from 'laas-world-sdk';
+import { VegetationRegistry, VegClass } from 'openworld-sdk';
 import { foliageMaterial } from '../render/VegMaterials';
 import { buildDryGrassTuft } from './Understory'; // import a builder or write custom ones
 
@@ -166,7 +166,7 @@ Rocks are icospheres perturbed by low-frequency noise (macro), strata ledges, ri
 To add a new rock preset, register it in the `RockRegistry`:
 
 ```ts
-import { RockRegistry, VegClass } from 'laas-world-sdk';
+import { RockRegistry, VegClass } from 'openworld-sdk';
 
 RockRegistry.register({
   id: 'obsidian-boulder',
@@ -199,7 +199,7 @@ A category translates into a custom GPU **Scatter Layer** running on its own can
 To register a custom category (e.g. ruins or ruins blocks):
 
 ```ts
-import { CategoryRegistry } from 'laas-world-sdk';
+import { CategoryRegistry } from 'openworld-sdk';
 
 CategoryRegistry.register({
   id: 'volcanic-vents',
@@ -227,7 +227,7 @@ CategoryRegistry.register({
 To initialize the WebGPU world programmatically using the SDK, configure the generator and pass a container element:
 
 ```ts
-import { WorldGenerator } from 'laas-world-sdk';
+import { WorldGenerator } from 'openworld-sdk';
 
 const container = document.getElementById('world-viewport')!;
 
@@ -240,6 +240,59 @@ const generator = new WorldGenerator({
 
 // Build the engine, heightfields, biomes, and scatter meshes
 generator.build(container).then((engine) => {
-  console.log('LAAS procedural virtual world successfully generated!');
+  console.log('OpenWorldGen procedural virtual world successfully generated!');
 });
+```
+
+---
+
+## 7. Generating Spherical Planetary Systems
+
+You can also use the SDK to generate multiple spherical planets floating in space (styled like *No Man's Sky*), using 3D noise deformation and orienting scattered registered vegetation/rocks along the sphere's normal directions:
+
+```ts
+import * as THREE from 'three';
+import { buildVegLibrary, VegClass } from 'openworld-sdk';
+
+// 1. Initialize the vegetation library
+const vegLib = await buildVegLibrary(renderer, seed);
+
+// 2. Generate a deformed planet sphere on the CPU using 3D Perlin/Simplex noise
+const radius = 150;
+const sphereGeo = new THREE.SphereGeometry(radius, 80, 80);
+const pos = sphereGeo.attributes.position;
+const radial = new THREE.Vector3();
+const vertexColors = new Float32Array(pos.count * 3);
+
+for (let i = 0; i < pos.count; i++) {
+  const v = new THREE.Vector3().fromBufferAttribute(pos, i);
+  radial.copy(v).normalize();
+  
+  // Apply 3D noise to get height displacement
+  const heightVal = myNoiseGen.fbm(v.x * 0.01, v.y * 0.01, v.z * 0.01) * 20;
+  v.addScaledVector(radial, heightVal);
+  pos.setXYZ(i, v.x, v.y, v.z);
+  
+  // Set vertex colors based on height / slope
+  const color = heightVal < 1.0 ? new THREE.Color(0xdad0a5) : new THREE.Color(0x408040);
+  vertexColors[i*3] = color.r;
+  vertexColors[i*3+1] = color.g;
+  vertexColors[i*3+2] = color.b;
+}
+sphereGeo.computeVertexNormals();
+sphereGeo.setAttribute('color', new THREE.BufferAttribute(vertexColors, 3));
+
+// 3. Scatter and orient trees/rocks on the sphere normal
+const normDir = new THREE.Vector3(0, 1, 0); // e.g. a sampled surface normal
+const instPos = normDir.clone().multiplyScalar(radius + heightVal);
+const instQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), normDir);
+
+// Compose the transformation matrix for THREE.InstancedMesh
+const matrix = new THREE.Matrix4().compose(instPos, instQuat, new THREE.Vector3(1,1,1));
+
+// Retrieve geometry and materials from VegLibrary pools and place instances
+const pool = vegLib.pools.find(p => p.cls === VegClass.Spruce && p.variant === 0);
+if (pool) {
+  // Add matrix to corresponding THREE.InstancedMesh
+}
 ```

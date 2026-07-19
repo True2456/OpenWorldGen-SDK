@@ -1,4 +1,4 @@
-/** LAAS entry point — boot sequence with fail-loud diagnostics. */
+/** OpenWorldGen entry point — boot sequence with fail-loud diagnostics. */
 
 import { BootUI } from './core/BootUI';
 import { browserGate } from './core/BrowserGate';
@@ -20,6 +20,7 @@ import { buildHerdScene } from './debug/HerdScene';
 import { buildSanityScene } from './debug/SanityScene';
 import { buildShadowTestScene } from './debug/ShadowTestScene';
 import { buildTerrainScene } from './debug/TerrainScene';
+import { buildPlanetScene } from './debug/PlanetScene';
 import { buildScene, registerScene, type WorldContext } from './debug/Scenes';
 
 async function boot(): Promise<void> {
@@ -42,7 +43,7 @@ async function bootOnce(): Promise<void> {
   const diag = await probeWebGPU();
   hooks.diag = diag;
   if (!diag.ok) {
-    failLoud('WebGPU unavailable — LAAS has no fallback by design', [
+    failLoud('WebGPU unavailable — OpenWorldGen has no fallback by design', [
       diag.reason ?? 'unknown reason',
       '',
       'Chrome exposes WebGPU here, but no usable GPU adapter came up. Check:',
@@ -53,7 +54,7 @@ async function bootOnce(): Promise<void> {
     return;
   }
   // eslint-disable-next-line no-console
-  console.log('[laas] webgpu ok\n' + describeDiagnostics(diag).join('\n'));
+  console.log('[openworld-sdk] webgpu ok\n' + describeDiagnostics(diag).join('\n'));
 
   bootUI.set(0.08, 'creating renderer');
   const engine = await Engine.create(params, hooks);
@@ -72,6 +73,7 @@ async function bootOnce(): Promise<void> {
   registerScene('herd', buildHerdScene);
   registerScene('drone', buildDroneScene);
   registerScene('shadowtest', buildShadowTestScene);
+  registerScene('planets', buildPlanetScene);
   // 'world' becomes the streamed open world once terrain tiles land.
   registerScene('world', buildTerrainScene);
 
@@ -123,7 +125,7 @@ async function bootOnce(): Promise<void> {
   bootUI.hide();
   hooks.ready = true;
   // eslint-disable-next-line no-console
-  console.log('[laas] ready');
+  console.log('[openworld-sdk] ready');
 }
 
 boot().catch((e: unknown) => {

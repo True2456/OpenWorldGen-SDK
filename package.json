@@ -1,9 +1,9 @@
 {
-  "name": "laas",
+  "name": "openworld-sdk",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "PROJECT LAAS \u2014 fully procedural open world in the browser (WebGPU)",
+  "description": "OpenWorldSDK — fully procedural open world generator SDK in the browser (WebGPU)",
   "scripts": {
     "dev": "vite --port 5173 --strictPort",
     "build": "tsc --noEmit && vite build",
