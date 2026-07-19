@@ -510,8 +510,23 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
           const cls = pConfig.allowedFoliage[Math.floor(rng.float() * pConfig.allowedFoliage.length)]!;
           const variant = Math.floor(rng.float() * 4);
           assetGroup.addInstance(cls, variant, instMatrix);
-        }
       }
+    }
+  }
+
+  // Place a guaranteed specimen tree at the North Pole of the Lush Planet for close-up surface screenshots
+    if (pIdx === 0) {
+      const poleDir = new THREE.Vector3(0, 1, 0);
+      const poleNoise = noiseGen.fbm(0, pConfig.freq * pConfig.radius, 0, 4);
+      const poleHeight = poleNoise * pConfig.scale;
+      const polePos = poleDir.clone().multiplyScalar(pConfig.radius + poleHeight);
+
+      const poleQuat = new THREE.Quaternion().setFromUnitVectors(alignY, poleDir);
+      const poleScale = new THREE.Vector3(1.3, 1.3, 1.3);
+      const poleMatrix = new THREE.Matrix4().compose(polePos, poleQuat, poleScale);
+
+      assetGroup.addInstance(VegClass.Beech, 0, poleMatrix);
+      console.log(`[laas] Lush North Pole surface Y = ${(pConfig.radius + poleHeight).toFixed(2)}`);
     }
 
     assetGroup.finalize();
