@@ -203,6 +203,8 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     meshes: THREE.InstancedMesh[];
   }[] = [];
 
+  const planetLODs: THREE.LOD[] = [];
+
   // Helper to create InstancedMeshes for a planet
   const createPlanetAssetGroup = (planetCenter: THREE.Vector3, maxInstances: number = 4000) => {
     const group = new THREE.Group();
@@ -237,6 +239,7 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
 
     const finalize = () => {
       instancedMeshes.forEach(record => {
+        record.mesh.count = record.count; // Crucial performance fix: only render actual placed instances!
         record.mesh.instanceMatrix.needsUpdate = true;
       });
     };
@@ -340,8 +343,8 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     // A. Create Three.js LOD geometry swapping
     const lod = new THREE.LOD();
     
-    // Deform geometries at different detail resolutions
-    const geoHigh = deformSphere(pConfig, 160); // LOD 0 (High)
+    // Deform geometries at different detail resolutions (LOD 0 = 240 subdivisions for massive close-up details!)
+    const geoHigh = deformSphere(pConfig, 240); // LOD 0 (High)
     const geoMed = deformSphere(pConfig, 64);   // LOD 1 (Medium)
     const geoLow = deformSphere(pConfig, 24);   // LOD 2 (Low)
 
@@ -405,6 +408,7 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
 
     lod.position.copy(pConfig.center);
     scene.add(lod);
+    planetLODs.push(lod);
 
     // C. Atmosphere Fresnel glow shell
     const atmosphereMat = buildAtmosphereMaterial(pConfig.colors.atmosphere);
@@ -520,15 +524,23 @@ export async function buildPlanetScene(ctx: WorldContext): Promise<void> {
     });
   });
 
-  // 5. Distance Culling Hook Loop
+  // 5. Distance Culling + Manual LOD Update Loop (WebGPURenderer compatibility)
   engine.onUpdate(() => {
-    const camPos = engine.camera.position;
+    const cam = engine.camera;
+    const camPos = cam.position;
+
+    // A. Perform distance-based asset visibility culling
     planetAssets.forEach(planet => {
       const dist = camPos.distanceTo(planet.center);
       const isVisible = dist < planet.radius * 3.5;
       planet.meshes.forEach(m => {
         m.visible = isVisible;
       });
+    });
+
+    // B. Force LOD updates manually on WebGPURenderer (crucial for swapping levels!)
+    planetLODs.forEach(lod => {
+      lod.update(cam);
     });
   });
 
